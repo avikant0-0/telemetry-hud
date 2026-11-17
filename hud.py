@@ -10,6 +10,12 @@ Design notes
   focus or intercepting clicks. It identifies itself normally to the OS —
   it does not hide from the taskbar switcher beyond the usual `Tool` hint,
   and it runs under its own name.
+* On Windows the pixels are also excluded from screen capture via
+  `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` (Windows 10 2004+).
+  This is a visual privacy measure only: the process, its window handle, and
+  its title remain fully visible to the OS and to you. Pass
+  `--capture-exclusion off` to disable it, or `monitor` for the legacy
+  black-rectangle behaviour on older builds.
 * The WebSocket client runs its own asyncio loop on a background thread and
   hands messages to the GUI thread through a Qt signal. (Qt widgets must only
   ever be touched from the main thread; queued signals do that marshalling
@@ -29,9 +35,11 @@ import signal
 import sys
 import threading
 
-from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QGuiApplication
+from PyQt6.QtCore import QEvent, Qt, QObject, QTimer, pyqtSignal
+from PyQt6.QtGui import QFont, QGuiApplication, QShowEvent
 from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+
+from win_stealth import CAPTURE_MODES, StealthReport, apply_window_stealth
 
 try:
     import websockets
@@ -119,11 +127,20 @@ class WebSocketClient(QObject):
 class OverlayHUD(QWidget):
     """The on-screen overlay: a translucent, click-through log tail."""
 
-    def __init__(self, url: str, max_lines: int = 14, width: int = 420) -> None:
+    def __init__(
+        self,
+        url: str,
+        max_lines: int = 14,
+        width: int = 420,
+        capture_exclusion: str = "exclude",
+    ) -> None:
         super().__init__()
         self._lines: list[str] = []
         self._max_lines = max_lines
         self._fixed_width = width
+        self._capture_exclusion = capture_exclusion
+        self._stealth_hwnd: int | None = None
+        self.stealth_report: StealthReport | None = None
         self._build_window()
         self._build_ui()
 
@@ -140,13 +157,40 @@ class OverlayHUD(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus
             | Qt.WindowType.WindowTransparentForInput  # <- click-through
         )
         # Translucent background so only our rounded panel is painted.
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         # Showing the window must not activate / focus it.
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._apply_stealth()
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.WinIdChange:
+            self._stealth_hwnd = None
+            if self.isVisible():
+                QTimer.singleShot(0, self._apply_stealth)
+        return super().event(event)
+
+    def _apply_stealth(self) -> None:
+        try:
+            hwnd = int(self.winId())
+            if hwnd == self._stealth_hwnd:
+                return
+            report = apply_window_stealth(hwnd, self._capture_exclusion)
+        except Exception as exc:  # noqa: BLE001 — stealth is best-effort
+            print(f"[hud] window stealth failed: {exc}", file=sys.stderr)
+            return
+        self._stealth_hwnd = hwnd
+        self.stealth_report = report
+        for message in report.messages:
+            print(f"[hud] {message}", file=sys.stderr)
 
     def _build_ui(self) -> None:
         self.setFixedWidth(self._fixed_width)
@@ -208,6 +252,12 @@ def main() -> None:
                         help="Window opacity 0.0–1.0 (default: 1.0)")
     parser.add_argument("--max-lines", type=int, default=14,
                         help="How many recent lines to keep on screen")
+    parser.add_argument("--capture-exclusion", choices=CAPTURE_MODES,
+                        default="exclude",
+                        help="Screen-capture handling on Windows: 'exclude' "
+                             "(omit from DWM captures, Win10 2004+), 'monitor' "
+                             "(black rectangle in captures), or 'off' "
+                             "(default: exclude)")
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
@@ -220,7 +270,11 @@ def main() -> None:
     keepalive.start(200)
     keepalive.timeout.connect(lambda: None)
 
-    hud = OverlayHUD(args.url, max_lines=args.max_lines)
+    hud = OverlayHUD(
+        args.url,
+        max_lines=args.max_lines,
+        capture_exclusion=args.capture_exclusion,
+    )
     hud.setWindowOpacity(max(0.1, min(1.0, args.opacity)))
     hud.show()
     hud.position_top_right()
