@@ -139,15 +139,27 @@ class _NativeFilter(QAbstractNativeEventFilter):
 
 
 class GlobalHotkey(QObject):
-    """A system-wide hotkey bound to the HUD's native window handle."""
+    """A system-wide hotkey bound to the HUD's native window handle.
+
+    Each instance must use its own *hotkey_id* (0x0000–0xBFFF) so WM_HOTKEY
+    messages can be routed to the right binding when several are registered
+    against the same window.
+    """
 
     activated = pyqtSignal()
 
-    def __init__(self, spec: str = "ctrl+alt+h", parent: QObject | None = None):
+    def __init__(
+        self,
+        spec: str = "ctrl+alt+x",
+        parent: QObject | None = None,
+        hotkey_id: int = 0x4A31,
+    ):
         super().__init__(parent)
+        if not 0x0000 <= hotkey_id <= 0xBFFF:
+            raise ValueError(f"hotkey id out of range: {hotkey_id:#x}")
         self.spec = spec
         self._modifiers, self._vk = parse_hotkey(spec)
-        self._id = 0x4A31
+        self._id = hotkey_id
         self._hwnd: int | None = None
         self._registered = False
         self.register_error: str | None = None
