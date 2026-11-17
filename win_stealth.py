@@ -8,8 +8,10 @@ Two independent mechanisms live here:
   (``WDA_EXCLUDEFROMCAPTURE``, Windows 10 2004+) or masks it as a black
   rectangle (``WDA_MONITOR``, the fallback for older builds and tools that
   only understand affinity value 1).
-* Input-transparency hardening through extended window styles, so the window
-  cannot take focus, appear in Alt+Tab/taskbar, or receive mouse input.
+* Input-transparency handling through extended window styles, so the window
+  either ignores mouse input entirely or accepts normal mouse/keyboard input.
+  `WS_EX_TOOLWINDOW` is kept either way, so the window never appears in
+  Alt+Tab or the taskbar.
 
 On non-Windows platforms the helpers return a report describing that nothing
 was changed.
@@ -41,7 +43,7 @@ _GWL_EXSTYLE = -20
 _WS_EX_TRANSPARENT = 0x00000020
 _WS_EX_TOOLWINDOW = 0x00000080
 _WS_EX_NOACTIVATE = 0x08000000
-_INPUT_STYLE_BITS = _WS_EX_TRANSPARENT | _WS_EX_TOOLWINDOW | _WS_EX_NOACTIVATE
+_TRANSPARENT_STYLE_BITS = _WS_EX_TRANSPARENT | _WS_EX_NOACTIVATE
 
 _SWP_NOSIZE = 0x0001
 _SWP_NOMOVE = 0x0002
@@ -57,12 +59,17 @@ class StealthReport:
     capture_mode: str
     capture_affinity: int | None
     capture_ok: bool
-    input_hardened: bool
+    input_transparent: bool
+    input_ok: bool
     messages: tuple[str, ...]
 
 
-def apply_window_stealth(hwnd: int, capture: str = "exclude") -> StealthReport:
-    """Apply capture exclusion and input hardening to a native top-level window."""
+def apply_window_stealth(
+    hwnd: int,
+    capture: str = "exclude",
+    input_transparent: bool = True,
+) -> StealthReport:
+    """Apply capture exclusion and the requested input mode to a top-level window."""
     if capture not in _CAPTURE_VALUES:
         raise ValueError(
             f"capture must be one of {', '.join(CAPTURE_MODES)}; got {capture!r}"
@@ -72,21 +79,38 @@ def apply_window_stealth(hwnd: int, capture: str = "exclude") -> StealthReport:
             capture_mode=capture,
             capture_affinity=None,
             capture_ok=False,
-            input_hardened=False,
+            input_transparent=input_transparent,
+            input_ok=False,
             messages=("window stealth is Windows-only; no native changes applied",),
         )
 
     messages: list[str] = []
     u32 = _get_user32()
     affinity, capture_ok = _apply_capture_affinity(u32, hwnd, capture, messages)
-    input_hardened = _harden_input(u32, hwnd, messages)
+    input_ok = _set_input_transparency(u32, hwnd, input_transparent, messages)
     return StealthReport(
         capture_mode=capture,
         capture_affinity=affinity,
         capture_ok=capture_ok,
-        input_hardened=input_hardened,
+        input_transparent=input_transparent,
+        input_ok=input_ok,
         messages=tuple(messages),
     )
+
+
+def set_input_transparency(
+    hwnd: int, transparent: bool
+) -> tuple[bool, tuple[str, ...]]:
+    """Toggle native input transparency at runtime.
+
+    Returns ``(ok, messages)``. When *transparent* is False the window accepts
+    mouse and keyboard input (while staying out of Alt+Tab/taskbar).
+    """
+    if sys.platform != "win32":
+        return False, ("input transparency is Windows-only; no native changes applied",)
+    messages: list[str] = []
+    ok = _set_input_transparency(_get_user32(), hwnd, transparent, messages)
+    return ok, tuple(messages)
 
 
 def _get_user32() -> ctypes.WinDLL:
@@ -172,9 +196,10 @@ def _apply_capture_affinity(
     return requested, True
 
 
-def _harden_input(
+def _set_input_transparency(
     u32: ctypes.WinDLL,
     hwnd: int,
+    transparent: bool,
     messages: list[str],
 ) -> bool:
     get_long = getattr(u32, "GetWindowLongPtrW", None) or u32.GetWindowLongW
@@ -186,15 +211,20 @@ def _harden_input(
 
     ctypes.set_last_error(0)
     current = int(get_long(hwnd, _GWL_EXSTYLE))
-    if current & _INPUT_STYLE_BITS != _INPUT_STYLE_BITS:
+    desired = current | _WS_EX_TOOLWINDOW
+    if transparent:
+        desired |= _TRANSPARENT_STYLE_BITS
+    else:
+        desired &= ~_TRANSPARENT_STYLE_BITS
+
+    if desired != current:
         ctypes.set_last_error(0)
-        previous = int(set_long(hwnd, _GWL_EXSTYLE, current | _INPUT_STYLE_BITS))
+        previous = int(set_long(hwnd, _GWL_EXSTYLE, desired))
         if previous == 0 and ctypes.get_last_error() != 0:
             error = ctypes.get_last_error()
             messages.append(
-                "could not add WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | "
-                f"WS_EX_TOOLWINDOW (error {error}); click-through may be "
-                "incomplete."
+                "could not update the extended window styles "
+                f"(error {error}); input transparency may be incorrect."
             )
             return False
         u32.SetWindowPos(
@@ -212,15 +242,27 @@ def _harden_input(
         )
 
     styles = int(get_long(hwnd, _GWL_EXSTYLE))
-    if styles & _INPUT_STYLE_BITS == _INPUT_STYLE_BITS:
-        messages.append(
-            "input transparency hardened (WS_EX_TRANSPARENT | "
-            "WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)."
-        )
+    required = _TRANSPARENT_STYLE_BITS | _WS_EX_TOOLWINDOW
+    actual = styles & required
+    expected = _WS_EX_TOOLWINDOW | (
+        _TRANSPARENT_STYLE_BITS if transparent else 0
+    )
+    if actual == expected:
+        if transparent:
+            messages.append(
+                "input transparency active (WS_EX_TRANSPARENT | "
+                "WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW): clicks and keys pass "
+                "through to the app underneath."
+            )
+        else:
+            messages.append(
+                "input transparency disabled (WS_EX_TOOLWINDOW kept): the "
+                "overlay accepts mouse and keyboard input."
+            )
         return True
 
     messages.append(
-        "input transparency is incomplete: extended styles did not stick "
-        f"(got {styles:#010x})."
+        "input transparency is in the wrong state: expected "
+        f"{expected:#010x}, got {actual:#010x}."
     )
     return False

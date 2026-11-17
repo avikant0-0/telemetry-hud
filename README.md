@@ -1,9 +1,11 @@
 # Telemetry HUD
 
-A borderless, translucent, always-on-top overlay that tails real-time text
-pushed from a WebSocket server. It is **click-through** (transparent to mouse
-input) and never steals focus, so it sits over your editor/terminal without
-getting in the way.
+A borderless, translucent, always-on-top overlay that embeds a web page
+(`https://www.google.com` by default). It starts **interactive**, so clicks and
+keystrokes go to the page. Press the global hotkey (`Ctrl+Alt+H` by default) to
+toggle **click-through** mode, where input passes straight through to whatever
+is underneath. The overlay never steals focus while click-through and stays
+out of the taskbar/Alt+Tab.
 
 This is an honest utility: it runs under its own name, shows up normally to
 the OS, and the supervisor only restarts the HUD if it *crashes* — it does not
@@ -13,11 +15,12 @@ resist you or your tools shutting it down.
 
 | File             | What it does                                                        |
 |------------------|---------------------------------------------------------------------|
-| `hud.py`         | The overlay window + background WebSocket client.                   |
-| `win_stealth.py` | Windows capture exclusion + native input-transparency hardening.    |
+| `hud.py`         | The overlay window + embedded QtWebEngine browser view.             |
+| `hotkey.py`      | System-wide hotkey (RegisterHotKey) that toggles click-through.     |
+| `win_stealth.py` | Windows capture exclusion + input-mode window styles.               |
 | `supervisor.py`  | Optional crash-recovery watchdog (relaunches the HUD if it exits).  |
-| `mock_server.py` | A 1-line-per-second fake telemetry source for testing.              |
-| `requirements.txt` | PyQt6 + websockets.                                               |
+| `mock_server.py` | Legacy WebSocket test source (no longer used by the overlay).       |
+| `requirements.txt` | PyQt6, PyQt6-WebEngine, and websockets (for `mock_server.py`).    |
 
 ## Setup
 
@@ -29,27 +32,26 @@ pip install -r requirements.txt
 
 ## Try it
 
-In one terminal:
-
 ```bash
-python mock_server.py
+python hud.py
 ```
 
-In another:
+You should see a panel in the top-right corner showing Google. Click into it
+and type normally; `Ctrl+Alt+H` locks it into click-through mode, and the same
+hotkey unlocks it.
+
+Point it elsewhere with `--page`:
 
 ```bash
-python hud.py --url ws://localhost:8765
+python hud.py --page https://example.com
 ```
 
-You should see a panel in the top-right corner updating every second. Clicks
-pass straight through it to whatever is underneath.
-
-Stop either with `Ctrl+C`.
+Stop with `Ctrl+C`.
 
 ## Run with crash recovery
 
 ```bash
-python supervisor.py --url ws://localhost:8765
+python supervisor.py --page https://www.google.com
 ```
 
 `Ctrl+C` stops the supervisor and the HUD together (no respawn). If the HUD
@@ -59,13 +61,16 @@ and prints why, instead of spinning forever.
 ## Options
 
 `hud.py`:
-- `--url` — WebSocket server URL (default `ws://localhost:8765`)
+- `--page` — page to embed (default `https://www.google.com`)
+- `--width` — overlay width in pixels (default 520)
+- `--height` — overlay height in pixels (default 680)
 - `--opacity` — window opacity 0.1–1.0 (default 1.0)
-- `--max-lines` — how many recent lines to keep on screen (default 14)
+- `--hotkey` — global click-through toggle (default `ctrl+alt+h`)
+- `--start-click-through` — start locked/click-through instead of interactive
 - `--capture-exclusion` — `exclude` (default), `monitor`, or `off` (see below)
 
 `supervisor.py`:
-- `--url` — passed through to the HUD
+- `--page` — passed through to the HUD
 - `--max-restarts` / `--window` — the restart cap and its rolling window
 
 ## Visual stealth (Windows)
@@ -78,11 +83,14 @@ Bar, Windows.Graphics.Capture apps, and most window/display recorders on
 Windows 10 2004+ (build 19041). The HUD still renders normally on your
 physical monitor.
 
-**Input hardening.** On top of `Qt.WindowTransparentForInput`, the native
-window gets `WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`, plus
-`WindowDoesNotAcceptFocus`, `WA_ShowWithoutActivating`, and
-`WA_TransparentForMouseEvents`. Clicks go to the app underneath, clicking
-never focuses the HUD, and it has no taskbar or Alt+Tab entry.
+**Input modes.** The global hotkey toggles between two native input modes.
+Interactive mode removes `WS_EX_TRANSPARENT`/`WS_EX_NOACTIVATE` and lets the
+window activate, so you can click links, scroll, and type in the page.
+Click-through mode adds `WS_EX_TRANSPARENT | WS_EX_NOACTIVATE` and clears the
+widget hit-test/focus flags, so input goes to the app underneath. Both modes
+keep `WS_EX_TOOLWINDOW`, so the HUD never appears in the taskbar or Alt+Tab.
+Because it is a tool window with `WA_ShowWithoutActivating`, merely launching
+it does not steal focus in either mode.
 
 | `--capture-exclusion` | Behaviour |
 |-----------------------|-----------|
@@ -98,23 +106,16 @@ this hides pixels from capture, not the app from the system. Treat it as
 stream/screenshot privacy, not a secrecy boundary. On non-Windows platforms
 the stealth module is a no-op and only Qt's cross-platform flags apply.
 
-## Wiring it to real data
-
-Point `--url` at any WebSocket server that sends text frames; each frame is
-appended as a new line (multi-line frames are split). For example, a small
-`asyncio` producer that reads `journalctl -f`, `docker logs -f`, or your app's
-metrics endpoint and forwards each line over `websockets.serve(...)` drops
-straight in where `mock_server.py` is.
-
 ## Notes on behaviour
 
-- **Click-through** comes from `Qt.WindowType.WindowTransparentForInput`. On
-  Windows, `win_stealth.py` additionally forces `WS_EX_TRANSPARENT` and
-  `WS_EX_NOACTIVATE` on the native window. A side effect is that you can't
-  drag the window with the mouse — it's positioned automatically (top-right).
-  Change `position_top_right()` in `hud.py` if you want it elsewhere.
-- **No focus stealing** comes from `WA_ShowWithoutActivating`,
-  `WindowDoesNotAcceptFocus`, and the `Tool` window flag.
+- **Click-through** is toggled by the global hotkey. `hud.py` updates both the
+  Qt window flags (`WindowTransparentForInput`, `WindowDoesNotAcceptFocus`)
+  and the native `WS_EX_TRANSPARENT`/`WS_EX_NOACTIVATE` styles at runtime, so
+  no window recreation or flicker is involved. The hotkey itself is a Windows
+  `RegisterHotKey` binding, so it works while another app has focus.
+- **No focus stealing on launch** comes from `WA_ShowWithoutActivating` and
+  the `Tool` window flag. In interactive mode a click focuses the page, as
+  usual.
 - **Capture exclusion** comes from `SetWindowDisplayAffinity` and is
   best-effort; see “Visual stealth” above.
 - **Translucent panel** comes from `WA_TranslucentBackground` plus the

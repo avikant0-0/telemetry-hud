@@ -13,7 +13,7 @@ reliability tool, not an anti-tamper mechanism:
 
 Usage
 -----
-    python supervisor.py --url ws://localhost:8765
+    python supervisor.py --page https://www.google.com
 """
 
 from __future__ import annotations
@@ -28,8 +28,9 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Crash-recovery supervisor for the HUD.")
-    parser.add_argument("--url", default="ws://localhost:8765",
-                        help="WebSocket URL to pass through to the HUD.")
+    parser.add_argument("--page", default="https://www.google.com",
+                        help="Page to pass through to the HUD (default: "
+                             "https://www.google.com)")
     parser.add_argument("--max-restarts", type=int, default=5,
                         help="Max restarts within --window seconds before giving up.")
     parser.add_argument("--window", type=float, default=60.0,
@@ -37,7 +38,7 @@ def main() -> None:
     args = parser.parse_args()
 
     hud_path = Path(__file__).with_name("hud.py")
-    cmd = [sys.executable, str(hud_path), "--url", args.url]
+    cmd = [sys.executable, str(hud_path), "--page", args.page]
 
     state = {"child": None, "stopping": False}
 
