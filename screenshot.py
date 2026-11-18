@@ -8,7 +8,9 @@ omitted from the screenshot while capturing the underlying desktop/apps.
 
 After the image is placed on the system clipboard, `paste_shortcut()` can
 synthesize Ctrl+V with `SendInput`, dropping it into whichever window has
-focus — for example, a Google AI prompt box in your browser or inside the HUD.
+focus — for example a Google AI prompt box in your browser. Pasting into the
+embedded HUD page itself is done by ``hud.py`` with a QWebEngine paste action,
+because the HUD never owns the foreground window.
 
 On non-Windows platforms capture and clipboard still work; auto-paste is a
 no-op and returns False.

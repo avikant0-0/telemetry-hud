@@ -11,8 +11,9 @@ whatever is underneath.
 Ctrl+Alt+C clears (hides) the overlay completely; the same hotkey brings it back.
 Ctrl+Alt+Arrow keys nudge the overlay in any mode, and click-through mode
 dims the window so it stays unobtrusive. Ctrl+Alt+S grabs a screenshot of the
-main screen, copies it to the clipboard, and (by default) sends Ctrl+V so it
-lands in whichever window has focus — e.g. a Google AI prompt box.
+main screen, copies it to the clipboard, and (by default) pastes it into the
+page you were typing in, or into the focused window when your last click was
+outside the HUD — e.g. a Google AI prompt box.
 Ctrl+Alt+Q closes and exits the application cleanly.
 
 Design notes
@@ -38,8 +39,9 @@ Design notes
   matter which application currently has focus.
 * Screenshots capture the main display screen (or embedded page with
   `--screenshot-target hud`), copying it to the clipboard, and can optionally
-  be pasted with a synthesized Ctrl+V. Under capture exclusion, the HUD window
-  itself is omitted from the captured screen image.
+  be pasted into the HUD page or, when the last click was outside, into the
+  focused window with a synthesized Ctrl+V. Under capture exclusion, the HUD
+  window itself is omitted from the captured screen image.
 
 Usage
 -----
@@ -79,6 +81,7 @@ def _log(message: str) -> None:
 
 
 try:
+    from PyQt6.QtWebEngineCore import QWebEnginePage
     from PyQt6.QtWebEngineWidgets import QWebEngineView
 except ImportError:  # pragma: no cover
     _log(
@@ -144,6 +147,8 @@ class OverlayHUD(QWidget):
         self._move_step = max(1, int(move_step))
         self._stealth_hwnd: int | None = None
         self.stealth_report: StealthReport | None = None
+        self._drag_origin: QPoint | None = None
+        self._drag_window_origin: QPoint | None = None
         self._screenshot_paste = bool(screenshot_paste)
         self._page_loaded = False
         self._hotkey = GlobalHotkey(hotkey, self)
@@ -250,9 +255,50 @@ class OverlayHUD(QWidget):
         # Clicks on the frame/header/status area must still put the keyboard
         # focus into the embedded page. The window deliberately never becomes
         # active; the global input gate handles typing without a focus change.
-        if self._interactive:
+        # A press on the frame (anything outside the page) also starts a drag.
+        if self._interactive and event.button() == Qt.MouseButton.LeftButton:
             self._focus_page()
+            self._drag_origin = event.globalPosition().toPoint()
+            self._drag_window_origin = self.pos()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._drag_origin is not None
+            and self._drag_window_origin is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            delta = event.globalPosition().toPoint() - self._drag_origin
+            target = self._drag_window_origin + delta
+            bounds = self._virtual_bounds()
+            if bounds is not None:
+                target.setX(
+                    max(bounds.left(),
+                        min(target.x(), bounds.right() - self.width() + 1))
+                )
+                target.setY(
+                    max(bounds.top(),
+                        min(target.y(), bounds.bottom() - self.height() + 1))
+                )
+            self.move(target)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._drag_origin is not None
+        ):
+            self._drag_origin = None
+            self._drag_window_origin = None
+            self.unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def _apply_stealth(self) -> None:
         self._sync_window_flags()
@@ -296,21 +342,28 @@ class OverlayHUD(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        self._mode_label = QLabel()
-        self._mode_label.setFont(QFont("Menlo", 8))
-        self._mode_label.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        self._snap_btn = QPushButton("◉")
+        self._snap_btn.setToolTip(
+            f"Screenshot ({hotkey_label(self._screenshot_hotkey.spec)})"
         )
+        self._snap_btn.setFixedSize(18, 18)
+        self._snap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._snap_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #000000; "
+            "border: none; font-size: 12px; font-weight: bold; border-radius: 3px; } "
+            "QPushButton:hover { color: #000000; background: rgba(255, 255, 255, 25); }"
+        )
+        self._snap_btn.clicked.connect(self.copy_screenshot)
 
         self._back_btn = QPushButton("‹")
         self._back_btn.setToolTip("Back")
         self._back_btn.setFixedSize(18, 18)
         self._back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._back_btn.setStyleSheet(
-            "QPushButton { background: transparent; color: rgba(180, 190, 205, 200); "
+            "QPushButton { background: transparent; color: #000000; "
             "border: none; font-size: 14px; font-weight: bold; border-radius: 3px; } "
-            "QPushButton:hover { color: #8ecbff; background: rgba(255, 255, 255, 25); } "
-            "QPushButton:disabled { color: rgba(150, 160, 175, 60); }"
+            "QPushButton:hover { color: #000000; background: rgba(255, 255, 255, 25); } "
+            "QPushButton:disabled { color: rgba(0, 0, 0, 80); }"
         )
         self._back_btn.setEnabled(False)
         self._back_btn.clicked.connect(self._go_back)
@@ -320,22 +373,23 @@ class OverlayHUD(QWidget):
         self._close_btn.setFixedSize(18, 18)
         self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._close_btn.setStyleSheet(
-            "QPushButton { background: transparent; color: rgba(180, 190, 205, 200); "
+            "QPushButton { background: transparent; color: #000000; "
             "border: none; font-size: 11px; font-weight: bold; border-radius: 3px; } "
-            "QPushButton:hover { color: #ff6b6b; background: rgba(255, 255, 255, 25); }"
+            "QPushButton:hover { color: #000000; background: rgba(255, 255, 255, 25); }"
         )
         self._close_btn.clicked.connect(self._quit_app)
 
         header_layout = QHBoxLayout()
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(4)
-        header_layout.addWidget(self._mode_label, 1)
+        header_layout.addStretch(1)
+        header_layout.addWidget(self._snap_btn, 0)
         header_layout.addWidget(self._back_btn, 0)
         header_layout.addWidget(self._close_btn, 0)
 
         self._status_label = QLabel(f"loading {self._page_url} …")
         self._status_label.setFont(QFont("Menlo", 8))
-        self._status_label.setStyleSheet("color: rgba(150, 160, 175, 230);")
+        self._status_label.setStyleSheet("color: #000000;")
         self._status_label.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
         )
@@ -421,6 +475,16 @@ class OverlayHUD(QWidget):
         self._screenshot_status_timer.start(self._STATUS_RESET_MS)
 
     def _paste_screenshot(self) -> None:
+        if self._interactive and self._input_gate.engaged:
+            # The HUD never owns the foreground window, so a synthesized
+            # Ctrl+V would land in the app underneath. Paste into the page
+            # the user was typing in instead.
+            self._focus_page()
+            self._web_view.page().triggerAction(
+                QWebEnginePage.WebAction.Paste
+            )
+            self._status_label.setText("screenshot pasted into HUD")
+            return
         if paste_shortcut():
             self._status_label.setText("screenshot pasted")
         else:
@@ -488,6 +552,11 @@ class OverlayHUD(QWidget):
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents, transparent
             )
             self._back_btn.setVisible(not transparent)
+        if hasattr(self, "_snap_btn"):
+            self._snap_btn.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, transparent
+            )
+            self._snap_btn.setVisible(not transparent)
         policy = (
             Qt.FocusPolicy.NoFocus if transparent
             else Qt.FocusPolicy.StrongFocus
@@ -577,33 +646,11 @@ class OverlayHUD(QWidget):
         QApplication.sendEvent(target, event)
 
     def _update_mode_ui(self) -> None:
-        hint = hotkey_label(self._hotkey.spec)
-        if self._hotkey.register_error:
-            hint = f"{hint} unavailable"
-        hide_hint = hotkey_label(self._hide_hotkey.spec)
-        if self._hide_hotkey.register_error:
-            hide_hint = f"{hide_hint} unavailable"
-        snap_hint = hotkey_label(self._screenshot_hotkey.spec)
-        if self._screenshot_hotkey.register_error:
-            snap_hint = f"{snap_hint} unavailable"
-        quit_hint = hotkey_label(self._quit_hotkey.spec)
-        if self._quit_hotkey.register_error:
-            quit_hint = f"{quit_hint} unavailable"
-        if self._interactive:
-            self._mode_label.setText(
-                f"interactive · {hint} lock · {hide_hint} clear · "
-                f"{snap_hint} snap · {quit_hint} quit"
-            )
-            mode_color = "rgba(120, 190, 255, 255)"
-            border = "rgba(90, 170, 255, 200)"
-        else:
-            self._mode_label.setText(
-                f"click-through · {hint} interact · {hide_hint} clear · "
-                f"{snap_hint} snap · {quit_hint} quit"
-            )
-            mode_color = "rgba(150, 160, 175, 230)"
-            border = "rgba(255, 255, 255, 20)"
-        self._mode_label.setStyleSheet(f"color: {mode_color};")
+        border = (
+            "rgba(90, 170, 255, 200)"
+            if self._interactive
+            else "rgba(255, 255, 255, 20)"
+        )
         self.setStyleSheet(
             "#hudPanel { background-color: rgba(18, 20, 26, 190); "
             f"border-radius: 10px; border: 1px solid {border}; }}"
@@ -692,8 +739,8 @@ def main() -> None:
                              "embedded HUD page (default: screen)")
     parser.add_argument("--screenshot-paste", choices=("auto", "clipboard"),
                         default="auto",
-                        help="'auto' also pastes the screenshot into the "
-                             "focused window with Ctrl+V; 'clipboard' only "
+                        help="'auto' also pastes the screenshot into the HUD "
+                             "page or the focused window; 'clipboard' only "
                              "copies it (default: auto)")
     parser.add_argument("--start-click-through", action="store_true",
                         help="Start in click-through mode instead of "

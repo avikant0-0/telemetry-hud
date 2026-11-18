@@ -5,16 +5,19 @@ A borderless, translucent, always-on-top overlay that embeds a web page
 typing, and scrolling reach the embedded page while the window underneath
 keeps focus — the HUD is a layer of glass, not a window that pops up in
 front. Click inside the HUD to engage typing; click outside to release it.
-The `‹` button in the header goes back in the page history; `✕` quits the
-application. Press the global hotkey (`Ctrl+Alt+X` by default) to
-toggle **click-through** mode, where input passes straight through to whatever
-is underneath. `Ctrl+Alt+C` clears (hides) the overlay completely (the same hotkey
+Drag the header bar to move the HUD. The `◉` header button takes a screenshot
+(same as `Ctrl+Alt+S`), `‹` goes back in the page history, and `✕` quits the
+application. Press the global hotkey (`Ctrl+Alt+X` by default) to toggle
+**click-through** mode, where input passes straight through to whatever is
+underneath.
+`Ctrl+Alt+C` clears (hides) the overlay completely (the same hotkey
 brings it back), and `Ctrl+Alt+Arrow` nudges the overlay in any mode. In
 click-through mode the window also dims to `--click-through-opacity`
 (0.35 by default) so it stays out of the way. `Ctrl+Alt+S` takes a screenshot
-of the main screen, copies it to the clipboard, and (by default) sends
-`Ctrl+V` so it lands in whatever window has focus — for example, a Google AI
-prompt box in your browser. Press `Ctrl+Alt+Q` or click the `✕` button on the
+of the main screen, copies it to the clipboard, and (by default) pastes it
+into the page you were typing in, or into the focused window when your last
+click was outside the HUD — for example, a Google AI prompt box. Press
+`Ctrl+Alt+Q` or click the `✕` button on the
 top header to quit the application cleanly. The overlay never steals focus in
 either mode and stays out of the taskbar/Alt+Tab.
 
@@ -58,9 +61,10 @@ again to bring it back. `Ctrl+Alt+Arrow` moves the panel; it is clamped to the
 virtual desktop so it cannot be nudged completely off-screen.
 
 `Ctrl+Alt+S` screenshots the main screen. The image is copied to the clipboard, and a
-moment later the HUD sends `Ctrl+V` to the focused window, so if your browser
-(or the HUD itself) has a Google AI prompt focused, the screenshot appears
-there immediately. Pass `--screenshot-paste clipboard` to copy only and paste
+moment later the HUD pastes it: into the page you were typing in if your last
+click was inside the HUD, otherwise into the focused window (e.g. a Google AI
+prompt in your browser). The `◉` header button does the same.
+Pass `--screenshot-paste clipboard` to copy only and paste
 yourself. Pass `--screenshot-target hud` to screenshot the embedded page instead.
 
 Point it elsewhere with `--page`:
@@ -82,14 +86,16 @@ If you instead wish to capture only the HUD's embedded browser view, pass
 `--screenshot-target hud`.
 
 With `--screenshot-paste auto` (the default) the HUD waits ~250 ms for you to
-release the hotkey, then synthesizes `Ctrl+V` with `SendInput`. Whichever window
-has focus receives the paste — for example a Google AI / Gemini prompt box in
-your browser, or the HUD's own page if it has focus. Use
+release the hotkey, then pastes the image. If you last clicked inside the HUD,
+it is pasted into the embedded page (via QtWebEngine) at the focused prompt
+box. If your last click was outside the HUD, it synthesizes `Ctrl+V` with
+`SendInput`, so the focused window receives the paste. Use
 `--screenshot-paste clipboard` to only copy the image and paste it yourself.
 
-Auto-paste is Windows-only and follows the usual `SendInput` rules: it cannot
-inject into an elevated (administrator) window from a non-elevated HUD. The
-image is still on the clipboard in that case, so paste manually with `Ctrl+V`.
+Auto-paste into other apps is Windows-only and follows the usual `SendInput`
+rules: it cannot inject into an elevated (administrator) window from a
+non-elevated HUD. The image is still on the clipboard in that case, so paste
+manually with `Ctrl+V`.
 
 ## Run with crash recovery
 
@@ -116,8 +122,9 @@ and prints why, instead of spinning forever.
 - `--quit-hotkey` — global exit hotkey (default `ctrl+alt+q`)
 - `--screenshot-hotkey` — global screenshot hotkey (default `ctrl+alt+s`)
 - `--screenshot-target` — `screen` (default) captures the main screen; `hud` captures the embedded page
-- `--screenshot-paste` — `auto` (default) copies the screenshot and sends
-  `Ctrl+V` to the focused window; `clipboard` only copies it
+- `--screenshot-paste` — `auto` (default) copies the screenshot and pastes it
+  into the page you were typing in (or the focused window if your last click
+  was outside the HUD); `clipboard` only copies it
 - `--start-click-through` — start locked/click-through instead of interactive
 - `--capture-exclusion` — `exclude` (default), `monitor`, or `off` (see below)
 
@@ -195,14 +202,18 @@ are ignored.
   while another app has focus.
 - **Movement** uses four more `RegisterHotKey` bindings (`Ctrl+Alt+Arrow`) and
   works in both modes, so a locked, click-through HUD can still be repositioned.
-  Each move is clamped to the virtual desktop's bounds.
+  In interactive mode you can also drag the header bar (or the status line)
+  with the mouse; the same virtual-desktop clamp applies. Each move is clamped
+  to the virtual desktop's bounds.
 - **Hide/show** uses another `RegisterHotKey` binding (`Ctrl+Alt+C`). Hiding
   removes the window from the screen; the binding stays registered, so the same
   hotkey brings it back with its previous position and mode.
-- **Screenshots** use another `RegisterHotKey` binding (`Ctrl+Alt+S`). The page
-  is rendered to a `QPixmap` in-process and placed on the clipboard, which
-  bypasses the window's capture exclusion. Auto-paste sends `Ctrl+V` to the
-  focused window via `SendInput` after a short delay.
+- **Screenshots** use another `RegisterHotKey` binding (`Ctrl+Alt+S`) or the
+  `◉` header button. The page is rendered to a `QPixmap` in-process and placed
+  on the clipboard, which bypasses the window's capture exclusion. Auto-paste
+  triggers a Paste in the embedded page after a short delay when you were last
+  interacting with the HUD; otherwise it sends `Ctrl+V` to the focused window
+  via `SendInput`.
 - **Click-through dimming** applies `--click-through-opacity` with
   `setWindowOpacity`, and restores `--opacity` when you switch back to
   interactive mode.
