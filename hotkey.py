@@ -187,6 +187,14 @@ class GlobalHotkey(QObject):
     def registered(self) -> bool:
         return self._registered
 
+    @property
+    def modifiers(self) -> int:
+        return self._modifiers
+
+    @property
+    def vk(self) -> int:
+        return self._vk
+
     def attach(self, hwnd: int) -> bool:
         """Register the hotkey against *hwnd* (re-registering if it changed)."""
         if not self._win32:

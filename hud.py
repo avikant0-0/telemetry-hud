@@ -3,9 +3,11 @@
 Telemetry HUD — a borderless, always-on-top overlay that embeds a web page
 (https://www.google.com by default).
 
-The overlay starts interactive: clicks and keystrokes go to the page. A
-system-wide hotkey (Ctrl+Alt+X by default) toggles click-through mode, in
-which mouse and keyboard input pass through to whatever is underneath.
+The overlay starts interactive: clicks and typing are delivered to the page
+without ever activating the window, so the app underneath keeps focus and
+never sees a window switch. A system-wide hotkey (Ctrl+Alt+X by default)
+toggles click-through mode, in which mouse and keyboard input pass through to
+whatever is underneath.
 Ctrl+Alt+C clears (hides) the overlay completely; the same hotkey brings it back.
 Ctrl+Alt+Arrow keys nudge the overlay in any mode, and click-through mode
 dims the window so it stays unobtrusive. Ctrl+Alt+S grabs a screenshot of the
@@ -17,10 +19,13 @@ Design notes
 ------------
 * The window is frameless and always-on-top, and it never appears in the
   taskbar or Alt+Tab (`Tool` hint plus `WS_EX_TOOLWINDOW`).
-* While click-through, the window ignores mouse input and cannot take focus.
-  On Windows this uses `Qt.WindowTransparentForInput`, `WS_EX_TRANSPARENT`,
-  and `WS_EX_NOACTIVATE`; the hotkey flips those native styles and the Qt
-  hit-test attributes at runtime.
+* The window is a non-activating "glass" overlay: `WS_EX_NOACTIVATE` is kept
+  in both modes, so clicking it never moves the foreground window. While
+  interactive, a low-level input gate (`input_capture.py`) captures typing and
+  the mouse wheel and replays them into the embedded page; LWIN combos, Alt
+  shortcuts, and the HUD's own hotkeys pass through. While click-through, the
+  window also ignores mouse input (`Qt.WindowTransparentForInput` plus
+  `WS_EX_TRANSPARENT`), so input goes to the app underneath.
 * On Windows the pixels are also excluded from screen capture via
   `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` (Windows 10 2004+).
   This is a visual privacy measure only: the process, its window handle, and
@@ -47,8 +52,16 @@ import argparse
 import signal
 import sys
 
-from PyQt6.QtCore import QEvent, QRect, Qt, QTimer, QUrl
-from PyQt6.QtGui import QFont, QGuiApplication, QShowEvent
+from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer, QUrl
+from PyQt6.QtGui import (
+    QFont,
+    QGuiApplication,
+    QHideEvent,
+    QKeyEvent,
+    QMouseEvent,
+    QShowEvent,
+    QWheelEvent,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -75,6 +88,7 @@ except ImportError:  # pragma: no cover
     raise
 
 from hotkey import GlobalHotkey, hotkey_label
+from input_capture import InputGate
 from screenshot import capture_screen, capture_widget, paste_shortcut
 from win_stealth import (
     CAPTURE_MODES,
@@ -151,6 +165,16 @@ class OverlayHUD(QWidget):
         self._screenshot_status_timer.timeout.connect(self._restore_status)
         self._move_hotkeys = self._build_move_hotkeys()
         self._build_window()
+        self._input_gate = InputGate(self)
+        self._input_gate.set_passthrough_hotkeys(
+            {(key.modifiers, key.vk) for key in self._all_hotkeys()}
+        )
+        self._input_gate.key_event.connect(
+            self._inject_key, Qt.ConnectionType.QueuedConnection
+        )
+        self._input_gate.wheel_event.connect(
+            self._inject_wheel, Qt.ConnectionType.QueuedConnection
+        )
         self._build_ui()
 
     def _all_hotkeys(self) -> tuple[GlobalHotkey, ...]:
@@ -197,6 +221,11 @@ class OverlayHUD(QWidget):
         super().showEvent(event)
         self._apply_stealth()
         self._register_hotkey()
+        self._sync_input_gate()
+
+    def hideEvent(self, event: QHideEvent) -> None:
+        super().hideEvent(event)
+        self._input_gate.disable()
 
     def event(self, event: QEvent) -> bool:
         if event.type() == QEvent.Type.WinIdChange:
@@ -205,7 +234,25 @@ class OverlayHUD(QWidget):
             if self.isVisible():
                 QTimer.singleShot(0, self._apply_stealth)
                 QTimer.singleShot(0, self._register_hotkey)
+                QTimer.singleShot(0, self._sync_input_gate)
         return super().event(event)
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if (
+            event.type() == QEvent.Type.ActivationChange
+            and self._interactive
+            and self.isActiveWindow()
+        ):
+            self._focus_page()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        # Clicks on the frame/header/status area must still put the keyboard
+        # focus into the embedded page. The window deliberately never becomes
+        # active; the global input gate handles typing without a focus change.
+        if self._interactive:
+            self._focus_page()
+        super().mousePressEvent(event)
 
     def _apply_stealth(self) -> None:
         self._sync_window_flags()
@@ -251,6 +298,9 @@ class OverlayHUD(QWidget):
 
         self._mode_label = QLabel()
         self._mode_label.setFont(QFont("Menlo", 8))
+        self._mode_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
 
         self._close_btn = QPushButton("✕")
         self._close_btn.setToolTip("Close HUD")
@@ -272,6 +322,9 @@ class OverlayHUD(QWidget):
         self._status_label = QLabel(f"loading {self._page_url} …")
         self._status_label.setFont(QFont("Menlo", 8))
         self._status_label.setStyleSheet("color: rgba(150, 160, 175, 230);")
+        self._status_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
 
         self._web_view = QWebEngineView(self)
         self._web_view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -380,7 +433,8 @@ class OverlayHUD(QWidget):
             return
         transparent = not self._interactive
         window.setFlag(Qt.WindowType.WindowTransparentForInput, transparent)
-        window.setFlag(Qt.WindowType.WindowDoesNotAcceptFocus, transparent)
+        # Never accept activation: the foreground window must stay put.
+        window.setFlag(Qt.WindowType.WindowDoesNotAcceptFocus, True)
 
     def set_interactive(
         self, interactive: bool, apply_native: bool = True
@@ -423,7 +477,19 @@ class OverlayHUD(QWidget):
         if transparent:
             self._web_view.clearFocus()
             self.clearFocus()
+        self._sync_input_gate()
         self._update_mode_ui()
+
+    def _sync_input_gate(self) -> None:
+        """Install or remove the global input hooks for the current mode."""
+        if not self.isVisible():
+            self._input_gate.disable()
+            return
+        self._input_gate.set_hwnd(int(self.winId()))
+        if self._interactive:
+            self._input_gate.enable()
+        else:
+            self._input_gate.disable()
 
     def set_base_opacity(self, opacity: float) -> None:
         self._base_opacity = max(0.1, min(1.0, float(opacity)))
@@ -436,6 +502,59 @@ class OverlayHUD(QWidget):
             else self._click_through_opacity
         )
         self.setWindowOpacity(max(0.1, min(1.0, target)))
+
+    def _focus_page(self) -> None:
+        """Give keyboard focus to the embedded page, if interactive."""
+        if not self._interactive or not hasattr(self, "_web_view"):
+            return
+        self._web_view.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    def _page_target(self) -> QWidget:
+        return self._web_view.focusProxy() or self._web_view
+
+    def _inject_key(
+        self,
+        qt_key: int,
+        is_release: bool,
+        text: str,
+        modifiers: int,
+        autorep: bool,
+    ) -> None:
+        """Replay a captured global key stroke into the embedded page."""
+        event_type = (
+            QEvent.Type.KeyRelease if is_release else QEvent.Type.KeyPress
+        )
+        event = QKeyEvent(
+            event_type,
+            int(qt_key),
+            Qt.KeyboardModifier(int(modifiers)),
+            text or "",
+            bool(autorep),
+        )
+        QApplication.sendEvent(self._page_target(), event)
+
+    def _inject_wheel(
+        self, dx: int, dy: int, global_x: int, global_y: int, modifiers: int
+    ) -> None:
+        """Replay a swallowed wheel event, using Qt logical coordinates."""
+        target = self._page_target()
+        ratio = float(self.devicePixelRatioF()) or 1.0
+        global_pos = QPointF(global_x / ratio, global_y / ratio)
+        local = target.mapFromGlobal(
+            QPoint(round(global_pos.x()), round(global_pos.y()))
+        )
+        event = QWheelEvent(
+            QPointF(local),
+            global_pos,
+            QPoint(0, 0),
+            QPoint(int(dx), int(dy)),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier(int(modifiers)),
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+            Qt.MouseEventSource.MouseEventNotSynthesized,
+        )
+        QApplication.sendEvent(target, event)
 
     def _update_mode_ui(self) -> None:
         hint = hotkey_label(self._hotkey.spec)
@@ -503,6 +622,7 @@ class OverlayHUD(QWidget):
             self.close()
 
     def shutdown(self) -> None:
+        self._input_gate.close()
         self._detach_hotkeys()
 
 

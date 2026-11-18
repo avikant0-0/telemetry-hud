@@ -1,8 +1,11 @@
 # Telemetry HUD
 
 A borderless, translucent, always-on-top overlay that embeds a web page
-(`https://www.google.com` by default). It starts **interactive**, so clicks and
-keystrokes go to the page. Press the global hotkey (`Ctrl+Alt+X` by default) to
+(`https://www.google.com` by default). It starts **interactive**: clicks,
+typing, and scrolling reach the embedded page while the window underneath
+keeps focus — the HUD is a layer of glass, not a window that pops up in
+front. Click inside the HUD to engage typing; click outside to release it.
+Press the global hotkey (`Ctrl+Alt+X` by default) to
 toggle **click-through** mode, where input passes straight through to whatever
 is underneath. `Ctrl+Alt+C` clears (hides) the overlay completely (the same hotkey
 brings it back), and `Ctrl+Alt+Arrow` nudges the overlay in any mode. In
@@ -11,8 +14,8 @@ click-through mode the window also dims to `--click-through-opacity`
 of the main screen, copies it to the clipboard, and (by default) sends
 `Ctrl+V` so it lands in whatever window has focus — for example, a Google AI
 prompt box in your browser. Press `Ctrl+Alt+Q` or click the `✕` button on the
-top header to quit the application cleanly. The overlay never steals focus while click-through
-and stays out of the taskbar/Alt+Tab.
+top header to quit the application cleanly. The overlay never steals focus in
+either mode and stays out of the taskbar/Alt+Tab.
 
 This is an honest utility: it runs under its own name, shows up normally to
 the OS, and the supervisor only restarts the HUD if it *crashes* — it does not
@@ -23,9 +26,10 @@ resist you or your tools shutting it down.
 | File             | What it does                                                        |
 |------------------|---------------------------------------------------------------------|
 | `hud.py`         | The overlay window + embedded QtWebEngine browser view.             |
+| `input_capture.py` | Global keyboard/mouse gate that feeds input to the glass overlay. |
 | `hotkey.py`      | System-wide hotkeys (RegisterHotKey): click-through toggle, hide, movement, and screenshot. |
 | `screenshot.py`  | Screen and page capture, clipboard copy, and synthesized Ctrl+V paste. |
-| `win_stealth.py` | Windows capture exclusion + input-mode window styles.               |
+| `win_stealth.py` | Windows capture exclusion + non-activating/input-transparent window styles. |
 | `supervisor.py`  | Optional crash-recovery watchdog (relaunches the HUD if it exits).  |
 | `mock_server.py` | Legacy WebSocket test source (no longer used by the overlay).       |
 | `requirements.txt` | PyQt6, PyQt6-WebEngine, and websockets (for `mock_server.py`).    |
@@ -45,8 +49,10 @@ python hud.py
 ```
 
 You should see a panel in the top-right corner showing Google. Click into it
-and type normally; `Ctrl+Alt+X` locks it into click-through mode, and the same
-hotkey unlocks it. `Ctrl+Alt+C` clears the overlay (makes it disappear entirely); press it
+to engage typing (the app underneath keeps focus and never sees the
+keystrokes); click outside the HUD to release it. `Ctrl+Alt+X` locks it into
+click-through mode, and the same hotkey unlocks it. `Ctrl+Alt+C` clears the
+overlay (makes it disappear entirely); press it
 again to bring it back. `Ctrl+Alt+Arrow` moves the panel; it is clamped to the
 virtual desktop so it cannot be nudged completely off-screen.
 
@@ -128,14 +134,16 @@ Bar, Windows.Graphics.Capture apps, and most window/display recorders on
 Windows 10 2004+ (build 19041). The HUD still renders normally on your
 physical monitor.
 
-**Input modes.** The global hotkey toggles between two native input modes.
-Interactive mode removes `WS_EX_TRANSPARENT`/`WS_EX_NOACTIVATE` and lets the
-window activate, so you can click links, scroll, and type in the page.
-Click-through mode adds `WS_EX_TRANSPARENT | WS_EX_NOACTIVATE` and clears the
-widget hit-test/focus flags, so input goes to the app underneath. Both modes
-keep `WS_EX_TOOLWINDOW`, so the HUD never appears in the taskbar or Alt+Tab.
-Because it is a tool window with `WA_ShowWithoutActivating`, merely launching
-it does not steal focus in either mode.
+**Input modes.** The HUD is always a non-activating overlay: it keeps
+`WS_EX_NOACTIVATE` in both modes, so clicking it never changes the foreground
+window. In interactive mode only `WS_EX_TRANSPARENT` is removed, and a
+low-level input gate replays your typing and wheel events into the page while
+the app underneath keeps focus. In click-through mode the window also adds
+`WS_EX_TRANSPARENT` and clears the widget hit-test/focus flags, so input goes
+to the app underneath. Both modes keep `WS_EX_TOOLWINDOW`, so the HUD never
+appears in the taskbar or Alt+Tab. Because it is a tool window with
+`WA_ShowWithoutActivating`, merely launching it does not steal focus in
+either mode.
 
 | `--capture-exclusion` | Behaviour |
 |-----------------------|-----------|
@@ -151,13 +159,39 @@ this hides pixels from capture, not the app from the system. Treat it as
 stream/screenshot privacy, not a secrecy boundary. On non-Windows platforms
 the stealth module is a no-op and only Qt's cross-platform flags apply.
 
+## Glass overlay input (Windows)
+
+The HUD is designed to behave like a layer of glass: interacting with it never
+makes it the foreground window, so the app underneath (a browser, an editor, a
+call) sees no activation change and never receives the keys you type into the
+HUD.
+
+- Clicks on the page (links, fields, buttons) are delivered without
+  activation.
+- The first left-click inside the HUD engages keyboard capture. Typing and
+  wheel events are swallowed globally and replayed into the embedded page;
+  clicking outside releases capture.
+- Switching apps (Alt+Tab, clicking another window, a dialog taking over)
+  also releases capture, so keys meant for another app are never swallowed.
+- Modifier keys, LWIN shortcuts, Alt shortcuts (Alt+Tab, Alt+F4, …), and the
+  HUD's own `RegisterHotKey` hotkeys bypass capture and reach Windows
+  normally.
+- The wheel over the HUD scrolls the page, not the window underneath.
+- Synthetic input (for example the automatic `Ctrl+V` after a screenshot) is
+  never swallowed.
+
+Known limitation: IME composition (Chinese/Japanese/Korean input, dead keys)
+is not replayed into the HUD yet; while capture is engaged, composition keys
+are ignored.
+
 ## Notes on behaviour
 
 - **Click-through** is toggled by the global hotkey. `hud.py` updates both the
   Qt window flags (`WindowTransparentForInput`, `WindowDoesNotAcceptFocus`)
-  and the native `WS_EX_TRANSPARENT`/`WS_EX_NOACTIVATE` styles at runtime, so
-  no window recreation or flicker is involved. The hotkey itself is a Windows
-  `RegisterHotKey` binding, so it works while another app has focus.
+  and the native `WS_EX_TRANSPARENT` style at runtime, so no window
+  recreation or flicker is involved. `WS_EX_NOACTIVATE` stays on in both
+  modes. The hotkey itself is a Windows `RegisterHotKey` binding, so it works
+  while another app has focus.
 - **Movement** uses four more `RegisterHotKey` bindings (`Ctrl+Alt+Arrow`) and
   works in both modes, so a locked, click-through HUD can still be repositioned.
   Each move is clamped to the virtual desktop's bounds.
@@ -171,9 +205,11 @@ the stealth module is a no-op and only Qt's cross-platform flags apply.
 - **Click-through dimming** applies `--click-through-opacity` with
   `setWindowOpacity`, and restores `--opacity` when you switch back to
   interactive mode.
-- **No focus stealing on launch** comes from `WA_ShowWithoutActivating` and
-  the `Tool` window flag. In interactive mode a click focuses the page, as
-  usual.
+- **No focus stealing** comes from `WA_ShowWithoutActivating`, the `Tool`
+  window flag, and `WS_EX_NOACTIVATE`, which is kept in both modes. Clicking
+  anywhere on the HUD moves focus into the embedded page without activating
+  the window; the global input gate (`input_capture.py`) replays keystrokes
+  so the app underneath never sees them. See “Glass overlay input” above.
 - **Capture exclusion** comes from `SetWindowDisplayAffinity` and is
   best-effort; see “Visual stealth” above.
 - **Translucent panel** comes from `WA_TranslucentBackground` plus the

@@ -9,9 +9,10 @@ Two independent mechanisms live here:
   rectangle (``WDA_MONITOR``, the fallback for older builds and tools that
   only understand affinity value 1).
 * Input-transparency handling through extended window styles, so the window
-  either ignores mouse input entirely or accepts normal mouse/keyboard input.
-  `WS_EX_TOOLWINDOW` is kept either way, so the window never appears in
-  Alt+Tab or the taskbar.
+  either ignores mouse input entirely or accepts mouse input without ever
+  becoming the foreground window. `WS_EX_NOACTIVATE` and `WS_EX_TOOLWINDOW`
+  are kept in both modes, so the overlay never steals focus and never appears
+  in Alt+Tab or the taskbar.
 
 On non-Windows platforms the helpers return a report describing that nothing
 was changed.
@@ -43,7 +44,6 @@ _GWL_EXSTYLE = -20
 _WS_EX_TRANSPARENT = 0x00000020
 _WS_EX_TOOLWINDOW = 0x00000080
 _WS_EX_NOACTIVATE = 0x08000000
-_TRANSPARENT_STYLE_BITS = _WS_EX_TRANSPARENT | _WS_EX_NOACTIVATE
 
 _SWP_NOSIZE = 0x0001
 _SWP_NOMOVE = 0x0002
@@ -103,8 +103,9 @@ def set_input_transparency(
 ) -> tuple[bool, tuple[str, ...]]:
     """Toggle native input transparency at runtime.
 
-    Returns ``(ok, messages)``. When *transparent* is False the window accepts
-    mouse and keyboard input (while staying out of Alt+Tab/taskbar).
+    Returns ``(ok, messages)``. The window is always kept non-activating
+    (``WS_EX_NOACTIVATE``) while staying out of Alt+Tab/taskbar; when
+    *transparent* is False, mouse clicks are delivered to the overlay.
     """
     if sys.platform != "win32":
         return False, ("input transparency is Windows-only; no native changes applied",)
@@ -211,11 +212,14 @@ def _set_input_transparency(
 
     ctypes.set_last_error(0)
     current = int(get_long(hwnd, _GWL_EXSTYLE))
-    desired = current | _WS_EX_TOOLWINDOW
+    # WS_EX_NOACTIVATE is always kept: clicks on the overlay must never move
+    # the foreground window away from the app underneath. Only the
+    # click-through bit changes between modes.
+    desired = current | _WS_EX_TOOLWINDOW | _WS_EX_NOACTIVATE
     if transparent:
-        desired |= _TRANSPARENT_STYLE_BITS
+        desired |= _WS_EX_TRANSPARENT
     else:
-        desired &= ~_TRANSPARENT_STYLE_BITS
+        desired &= ~_WS_EX_TRANSPARENT
 
     if desired != current:
         ctypes.set_last_error(0)
@@ -242,12 +246,13 @@ def _set_input_transparency(
         )
 
     styles = int(get_long(hwnd, _GWL_EXSTYLE))
-    required = _TRANSPARENT_STYLE_BITS | _WS_EX_TOOLWINDOW
-    actual = styles & required
-    expected = _WS_EX_TOOLWINDOW | (
-        _TRANSPARENT_STYLE_BITS if transparent else 0
+    required = _WS_EX_TOOLWINDOW | _WS_EX_NOACTIVATE | (
+        _WS_EX_TRANSPARENT if transparent else 0
     )
-    if actual == expected:
+    actual = styles & (
+        _WS_EX_TOOLWINDOW | _WS_EX_NOACTIVATE | _WS_EX_TRANSPARENT
+    )
+    if actual == required:
         if transparent:
             messages.append(
                 "input transparency active (WS_EX_TRANSPARENT | "
@@ -256,13 +261,14 @@ def _set_input_transparency(
             )
         else:
             messages.append(
-                "input transparency disabled (WS_EX_TOOLWINDOW kept): the "
-                "overlay accepts mouse and keyboard input."
+                "overlay stays non-activating (WS_EX_NOACTIVATE | "
+                "WS_EX_TOOLWINDOW): clicks reach the HUD without changing "
+                "the foreground window."
             )
         return True
 
     messages.append(
         "input transparency is in the wrong state: expected "
-        f"{expected:#010x}, got {actual:#010x}."
+        f"{required:#010x}, got {actual:#010x}."
     )
     return False
