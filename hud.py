@@ -302,6 +302,19 @@ class OverlayHUD(QWidget):
             Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
         )
 
+        self._back_btn = QPushButton("‹")
+        self._back_btn.setToolTip("Back")
+        self._back_btn.setFixedSize(18, 18)
+        self._back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._back_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: rgba(180, 190, 205, 200); "
+            "border: none; font-size: 14px; font-weight: bold; border-radius: 3px; } "
+            "QPushButton:hover { color: #8ecbff; background: rgba(255, 255, 255, 25); } "
+            "QPushButton:disabled { color: rgba(150, 160, 175, 60); }"
+        )
+        self._back_btn.setEnabled(False)
+        self._back_btn.clicked.connect(self._go_back)
+
         self._close_btn = QPushButton("✕")
         self._close_btn.setToolTip("Close HUD")
         self._close_btn.setFixedSize(18, 18)
@@ -317,6 +330,7 @@ class OverlayHUD(QWidget):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(4)
         header_layout.addWidget(self._mode_label, 1)
+        header_layout.addWidget(self._back_btn, 0)
         header_layout.addWidget(self._close_btn, 0)
 
         self._status_label = QLabel(f"loading {self._page_url} …")
@@ -331,6 +345,7 @@ class OverlayHUD(QWidget):
         self._web_view.loadStarted.connect(self._on_load_started)
         self._web_view.loadProgress.connect(self._on_load_progress)
         self._web_view.loadFinished.connect(self._on_load_finished)
+        self._web_view.urlChanged.connect(self._update_back_button)
 
         layout.addLayout(header_layout)
         layout.addWidget(self._status_label)
@@ -468,6 +483,11 @@ class OverlayHUD(QWidget):
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents, transparent
             )
             self._close_btn.setVisible(not transparent)
+        if hasattr(self, "_back_btn"):
+            self._back_btn.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, transparent
+            )
+            self._back_btn.setVisible(not transparent)
         policy = (
             Qt.FocusPolicy.NoFocus if transparent
             else Qt.FocusPolicy.StrongFocus
@@ -604,10 +624,18 @@ class OverlayHUD(QWidget):
     def _on_load_finished(self, ok: bool) -> None:
         self._screenshot_status_timer.stop()
         self._page_loaded = bool(ok)
+        self._update_back_button()
         if ok:
             self._status_label.setText(self._page_status_text())
         else:
             self._status_label.setText(f"failed to load {self._page_url}")
+
+    def _go_back(self) -> None:
+        if self._web_view.history().canGoBack():
+            self._web_view.back()
+
+    def _update_back_button(self, *_args) -> None:
+        self._back_btn.setEnabled(self._web_view.history().canGoBack())
 
     def _current_url(self) -> str:
         url = self._web_view.url().toString()

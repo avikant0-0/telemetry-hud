@@ -5,7 +5,8 @@ A borderless, translucent, always-on-top overlay that embeds a web page
 typing, and scrolling reach the embedded page while the window underneath
 keeps focus — the HUD is a layer of glass, not a window that pops up in
 front. Click inside the HUD to engage typing; click outside to release it.
-Press the global hotkey (`Ctrl+Alt+X` by default) to
+The `‹` button in the header goes back in the page history; `✕` quits the
+application. Press the global hotkey (`Ctrl+Alt+X` by default) to
 toggle **click-through** mode, where input passes straight through to whatever
 is underneath. `Ctrl+Alt+C` clears (hides) the overlay completely (the same hotkey
 brings it back), and `Ctrl+Alt+Arrow` nudges the overlay in any mode. In
