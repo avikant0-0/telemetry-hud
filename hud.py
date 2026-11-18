@@ -91,7 +91,7 @@ except ImportError:  # pragma: no cover
     )
     raise
 
-from hotkey import GlobalHotkey, hotkey_label
+from hotkey import MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, GlobalHotkey, hotkey_label
 from hotkey_ui import (
     SettingsView,
     decompose_hotkey,
@@ -134,6 +134,16 @@ class OverlayHUD(QWidget):
     _VK_DOWN = 0x28
     _VK_CONTROL = 0x11
     _VK_SHIFT = 0x10
+    _VK_ALT = 0x12
+    _VK_LWIN = 0x5B
+
+    # Map normalized modifier names (from decompose_hotkey) to VK codes
+    _MODIFIER_VK = {
+        "ctrl": _VK_CONTROL,
+        "alt": _VK_ALT,
+        "shift": _VK_SHIFT,
+        "win": _VK_LWIN,
+    }
 
     def __init__(
         self,
@@ -228,9 +238,7 @@ class OverlayHUD(QWidget):
                 spec, self, hotkey_id=self._MOVE_HOTKEY_ID + offset
             )
             hotkey.activated.connect(
-                lambda _=False, dx=dx, dy=dy: self.move_by(
-                    dx * self._move_step, dy * self._move_step
-                )
+                lambda _=False, dx=dx, dy=dy: self._start_slide(dx, dy)
             )
             hotkeys.append(hotkey)
         return hotkeys
@@ -272,15 +280,19 @@ class OverlayHUD(QWidget):
         try:
             import ctypes as _ctypes
             user32 = _ctypes.windll.user32
-            ctrl_down = bool(user32.GetAsyncKeyState(self._VK_CONTROL) & 0x8000)
-            shift_down = bool(user32.GetAsyncKeyState(self._VK_SHIFT) & 0x8000)
+            mods, _ = decompose_hotkey(self._move_modifiers or "ctrl+alt")
+            held = all(
+                bool(user32.GetAsyncKeyState(self._MODIFIER_VK[mod]) & 0x8000)
+                for mod in mods
+                if mod in self._MODIFIER_VK
+            )
             arrow_down = arrow_vk is not None and bool(
                 user32.GetAsyncKeyState(arrow_vk) & 0x8000
             )
         except Exception:
             self._slide_timer.stop()
             return
-        if ctrl_down and shift_down and arrow_down:
+        if held and arrow_down:
             self.move_by(self._slide_dx * self._move_step, self._slide_dy * self._move_step)
         else:
             self._slide_timer.stop()
@@ -302,9 +314,7 @@ class OverlayHUD(QWidget):
             spec = f"{mod_prefix}+{dir_name}"
             hk = GlobalHotkey(spec, self, hotkey_id=self._MOVE_HOTKEY_ID + offset)
             hk.activated.connect(
-                lambda _=False, dx=dx, dy=dy: self.move_by(
-                    dx * self._move_step, dy * self._move_step
-                )
+                lambda _=False, dx=dx, dy=dy: self._start_slide(dx, dy)
             )
             if hwnd is not None:
                 if not hk.attach(hwnd):
