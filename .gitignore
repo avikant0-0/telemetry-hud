@@ -13,3 +13,7 @@ dist/
 venv/
 ENV/
 env/
+
+# User runtime settings
+hotkeys.json
+

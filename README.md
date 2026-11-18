@@ -6,8 +6,9 @@ typing, and scrolling reach the embedded page while the window underneath
 keeps focus — the HUD is a layer of glass, not a window that pops up in
 front. Click inside the HUD to engage typing; click outside to release it.
 Drag the header bar to move the HUD. The `◉` header button takes a screenshot
-(same as `Ctrl+Alt+S`), `‹` goes back in the page history, and `✕` quits the
-application. Press the global hotkey (`Ctrl+Alt+X` by default) to toggle
+(same as `Ctrl+Alt+S`), `‹` goes back in the page history, `⚙` opens the
+in-app Hotkey Settings panel, and `✕` quits the application. Press the global
+hotkey (`Ctrl+Alt+X` by default) to toggle
 **click-through** mode, where input passes straight through to whatever is
 underneath.
 `Ctrl+Alt+C` clears (hides) the overlay completely (the same hotkey
@@ -30,6 +31,7 @@ resist you or your tools shutting it down.
 | File             | What it does                                                        |
 |------------------|---------------------------------------------------------------------|
 | `hud.py`         | The overlay window + embedded QtWebEngine browser view.             |
+| `hotkey_ui.py`   | Hotkey selector settings panel and key recording controls.          |
 | `input_capture.py` | Global keyboard/mouse gate that feeds input to the glass overlay. |
 | `hotkey.py`      | System-wide hotkeys (RegisterHotKey): click-through toggle, hide, movement, and screenshot. |
 | `screenshot.py`  | Screen and page capture, clipboard copy, and synthesized Ctrl+V paste. |

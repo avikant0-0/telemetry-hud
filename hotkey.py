@@ -45,6 +45,7 @@ _KEYS = {
     "tab": 0x09,
     "enter": 0x0D,
     "return": 0x0D,
+    "ent": 0x0D,
     "esc": 0x1B,
     "escape": 0x1B,
     "space": 0x20,
@@ -61,6 +62,7 @@ _KEYS = {
     "`": 0xC0,
     "-": 0xBD,
     "=": 0xBB,
+    "plus": 0xBB,
     "[": 0xDB,
     "]": 0xDD,
     "\\": 0xDC,
@@ -224,6 +226,43 @@ class GlobalHotkey(QObject):
             self._user32.UnregisterHotKey(self._hwnd, self._id)
         self._registered = False
         self._hwnd = None
+
+    def rebind(self, spec: str) -> bool:
+        """Rebind this hotkey to a new specification string.
+
+        Detaches the previous hotkey (if attached) and registers the new one.
+        If registration fails, restores the previous binding and returns False.
+        """
+        old_spec = self.spec
+        old_modifiers = self._modifiers
+        old_vk = self._vk
+        old_hwnd = self._hwnd
+        was_registered = self._registered
+
+        try:
+            new_modifiers, new_vk = parse_hotkey(spec)
+        except ValueError as exc:
+            self.register_error = str(exc)
+            return False
+
+        if was_registered:
+            self.detach()
+
+        self.spec = spec
+        self._modifiers = new_modifiers
+        self._vk = new_vk
+
+        if old_hwnd is not None:
+            if not self.attach(old_hwnd):
+                # Attachment failed: revert to previous binding
+                self.spec = old_spec
+                self._modifiers = old_modifiers
+                self._vk = old_vk
+                if was_registered:
+                    self.attach(old_hwnd)
+                return False
+
+        return True
 
     def _handle_native_event(self, event_type, message):
         if not self._registered:

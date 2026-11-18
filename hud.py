@@ -69,6 +69,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -91,6 +92,12 @@ except ImportError:  # pragma: no cover
     raise
 
 from hotkey import GlobalHotkey, hotkey_label
+from hotkey_ui import (
+    SettingsView,
+    decompose_hotkey,
+    load_hotkeys_config,
+    save_hotkeys_config,
+)
 from input_capture import InputGate
 from screenshot import capture_screen, capture_widget, paste_shortcut
 from win_stealth import (
@@ -111,11 +118,22 @@ class OverlayHUD(QWidget):
         ("ctrl+alt+down", 0, 1),
     )
     _MOVE_HOTKEY_ID = 0x4A32
+    _SLIDE_HOTKEY_ID = 0x4A40        # Ctrl+Shift+Arrow hold-to-repeat IDs (4 directions: 0x4A40-0x4A43)
     _HIDE_HOTKEY_ID = 0x4A36
     _SCREENSHOT_HOTKEY_ID = 0x4A37
     _QUIT_HOTKEY_ID = 0x4A38
     _PASTE_DELAY_MS = 250
     _STATUS_RESET_MS = 3000
+    _SLIDE_REPEAT_INITIAL_MS = 50   # first repeat delay (ms)
+    _SLIDE_REPEAT_INTERVAL_MS = 30  # subsequent repeat interval (ms)
+
+    # VK codes for the four arrow keys (used by GetAsyncKeyState polling)
+    _VK_LEFT = 0x25
+    _VK_UP = 0x26
+    _VK_RIGHT = 0x27
+    _VK_DOWN = 0x28
+    _VK_CONTROL = 0x11
+    _VK_SHIFT = 0x10
 
     def __init__(
         self,
@@ -132,6 +150,7 @@ class OverlayHUD(QWidget):
         start_click_through: bool = False,
         click_through_opacity: float = 0.35,
         move_step: int = 40,
+        move_modifiers: str = "ctrl+alt",
     ) -> None:
         super().__init__()
         self._page_url = page_url
@@ -145,6 +164,7 @@ class OverlayHUD(QWidget):
             0.1, min(1.0, float(click_through_opacity))
         )
         self._move_step = max(1, int(move_step))
+        self._move_modifiers = move_modifiers or "ctrl+alt"
         self._stealth_hwnd: int | None = None
         self.stealth_report: StealthReport | None = None
         self._drag_origin: QPoint | None = None
@@ -169,6 +189,12 @@ class OverlayHUD(QWidget):
         self._screenshot_status_timer.setSingleShot(True)
         self._screenshot_status_timer.timeout.connect(self._restore_status)
         self._move_hotkeys = self._build_move_hotkeys()
+        self._slide_hotkeys = self._build_slide_hotkeys()
+        # Repeat-slide state: timer fires continuously while Ctrl+Shift+Arrow held
+        self._slide_timer = QTimer(self)
+        self._slide_timer.timeout.connect(self._on_slide_tick)
+        self._slide_dx: int = 0
+        self._slide_dy: int = 0
         self._build_window()
         self._input_gate = InputGate(self)
         self._input_gate.set_passthrough_hotkeys(
@@ -189,11 +215,15 @@ class OverlayHUD(QWidget):
             self._screenshot_hotkey,
             self._quit_hotkey,
             *self._move_hotkeys,
+            *self._slide_hotkeys,
         )
 
     def _build_move_hotkeys(self) -> list[GlobalHotkey]:
         hotkeys: list[GlobalHotkey] = []
-        for offset, (spec, dx, dy) in enumerate(self._MOVE_BINDINGS):
+        directions = (("left", -1, 0), ("up", 0, -1), ("right", 1, 0), ("down", 0, 1))
+        mod_prefix = self._move_modifiers or "ctrl+alt"
+        for offset, (dir_name, dx, dy) in enumerate(directions):
+            spec = f"{mod_prefix}+{dir_name}"
             hotkey = GlobalHotkey(
                 spec, self, hotkey_id=self._MOVE_HOTKEY_ID + offset
             )
@@ -204,6 +234,131 @@ class OverlayHUD(QWidget):
             )
             hotkeys.append(hotkey)
         return hotkeys
+
+    def _build_slide_hotkeys(self) -> list[GlobalHotkey]:
+        """Build Ctrl+Shift+Arrow hotkeys that start a hold-to-repeat slide."""
+        hotkeys: list[GlobalHotkey] = []
+        directions = (("left", -1, 0), ("up", 0, -1), ("right", 1, 0), ("down", 0, 1))
+        for offset, (dir_name, dx, dy) in enumerate(directions):
+            spec = f"ctrl+shift+{dir_name}"
+            hk = GlobalHotkey(spec, self, hotkey_id=self._SLIDE_HOTKEY_ID + offset)
+            hk.activated.connect(
+                lambda _=False, dx=dx, dy=dy: self._start_slide(dx, dy)
+            )
+            hotkeys.append(hk)
+        return hotkeys
+
+    def _start_slide(self, dx: int, dy: int) -> None:
+        """Begin continuous sliding in direction (dx, dy) while key is held."""
+        self._slide_dx = dx
+        self._slide_dy = dy
+        # Immediately move once
+        self.move_by(dx * self._move_step, dy * self._move_step)
+        # Start repeating timer (fires repeatedly every interval)
+        self._slide_timer.setInterval(self._SLIDE_REPEAT_INTERVAL_MS)
+        if not self._slide_timer.isActive():
+            self._slide_timer.start()
+
+    def _on_slide_tick(self) -> None:
+        """Called every interval while slide timer runs; stops when key released."""
+        # Map direction to VK code
+        vk_map = {
+            (-1, 0): self._VK_LEFT,
+            (0, -1): self._VK_UP,
+            (1, 0): self._VK_RIGHT,
+            (0, 1): self._VK_DOWN,
+        }
+        arrow_vk = vk_map.get((self._slide_dx, self._slide_dy))
+        try:
+            import ctypes as _ctypes
+            user32 = _ctypes.windll.user32
+            ctrl_down = bool(user32.GetAsyncKeyState(self._VK_CONTROL) & 0x8000)
+            shift_down = bool(user32.GetAsyncKeyState(self._VK_SHIFT) & 0x8000)
+            arrow_down = arrow_vk is not None and bool(
+                user32.GetAsyncKeyState(arrow_vk) & 0x8000
+            )
+        except Exception:
+            self._slide_timer.stop()
+            return
+        if ctrl_down and shift_down and arrow_down:
+            self.move_by(self._slide_dx * self._move_step, self._slide_dy * self._move_step)
+        else:
+            self._slide_timer.stop()
+
+    def _update_move_hotkeys(self, new_modifiers_spec: str) -> bool:
+        mods, _ = decompose_hotkey(new_modifiers_spec)
+        ordered = [m for m in ("ctrl", "alt", "shift", "win") if m in mods]
+        mod_prefix = "+".join(ordered) if ordered else "ctrl+alt"
+        self._move_modifiers = mod_prefix
+
+        for hk in self._move_hotkeys:
+            hk.detach()
+
+        directions = (("left", -1, 0), ("up", 0, -1), ("right", 1, 0), ("down", 0, 1))
+        all_ok = True
+        hwnd = int(self.winId()) if self.isVisible() else None
+        new_hotkeys = []
+        for offset, (dir_name, dx, dy) in enumerate(directions):
+            spec = f"{mod_prefix}+{dir_name}"
+            hk = GlobalHotkey(spec, self, hotkey_id=self._MOVE_HOTKEY_ID + offset)
+            hk.activated.connect(
+                lambda _=False, dx=dx, dy=dy: self.move_by(
+                    dx * self._move_step, dy * self._move_step
+                )
+            )
+            if hwnd is not None:
+                if not hk.attach(hwnd):
+                    all_ok = False
+            new_hotkeys.append(hk)
+        self._move_hotkeys = new_hotkeys
+        return all_ok
+
+    def _save_current_hotkeys(self) -> None:
+        cfg = {
+            "hide": self._hide_hotkey.spec,
+            "click_through": self._hotkey.spec,
+            "screenshot": self._screenshot_hotkey.spec,
+            "quit": self._quit_hotkey.spec,
+            "move": self._move_modifiers,
+        }
+        save_hotkeys_config(cfg)
+
+    def _on_hotkey_changed(self, action_id: str, new_spec: str) -> None:
+        _log(f"hotkey '{action_id}' changed to '{new_spec}'")
+        ok = True
+        error_msg = None
+
+        if action_id == "hide":
+            ok = self._hide_hotkey.rebind(new_spec)
+            error_msg = self._hide_hotkey.register_error
+        elif action_id == "click_through":
+            ok = self._hotkey.rebind(new_spec)
+            error_msg = self._hotkey.register_error
+        elif action_id == "screenshot":
+            ok = self._screenshot_hotkey.rebind(new_spec)
+            error_msg = self._screenshot_hotkey.register_error
+            if ok:
+                self._snap_btn.setToolTip(
+                    f"Screenshot ({hotkey_label(self._screenshot_hotkey.spec)})"
+                )
+        elif action_id == "quit":
+            ok = self._quit_hotkey.rebind(new_spec)
+            error_msg = self._quit_hotkey.register_error
+        elif action_id == "move":
+            ok = self._update_move_hotkeys(new_spec)
+            if not ok:
+                error_msg = "failed to bind move hotkeys"
+
+        if not ok:
+            self._settings_view.set_card_error(
+                action_id, error_msg or "Failed to register hotkey with system"
+            )
+        else:
+            self._settings_view.set_card_error(action_id, None)
+            self._input_gate.set_passthrough_hotkeys(
+                {(key.modifiers, key.vk) for key in self._all_hotkeys()}
+            )
+            self._save_current_hotkeys()
 
     # -- window setup -------------------------------------------------------
 
@@ -257,7 +412,8 @@ class OverlayHUD(QWidget):
         # active; the global input gate handles typing without a focus change.
         # A press on the frame (anything outside the page) also starts a drag.
         if self._interactive and event.button() == Qt.MouseButton.LeftButton:
-            self._focus_page()
+            if not (hasattr(self, "_stack") and hasattr(self, "_settings_view") and self._stack.currentWidget() == self._settings_view):
+                self._focus_page()
             self._drag_origin = event.globalPosition().toPoint()
             self._drag_window_origin = self.pos()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -349,9 +505,9 @@ class OverlayHUD(QWidget):
         self._snap_btn.setFixedSize(18, 18)
         self._snap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._snap_btn.setStyleSheet(
-            "QPushButton { background: transparent; color: #000000; "
+            "QPushButton { background: rgba(0,0,0,160); color: #E2E8F0; "
             "border: none; font-size: 12px; font-weight: bold; border-radius: 3px; } "
-            "QPushButton:hover { color: #000000; background: rgba(255, 255, 255, 25); }"
+            "QPushButton:hover { color: #ffffff; background: rgba(0, 0, 0, 220); }"
         )
         self._snap_btn.clicked.connect(self.copy_screenshot)
 
@@ -360,22 +516,33 @@ class OverlayHUD(QWidget):
         self._back_btn.setFixedSize(18, 18)
         self._back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._back_btn.setStyleSheet(
-            "QPushButton { background: transparent; color: #000000; "
+            "QPushButton { background: rgba(0,0,0,160); color: #E2E8F0; "
             "border: none; font-size: 14px; font-weight: bold; border-radius: 3px; } "
-            "QPushButton:hover { color: #000000; background: rgba(255, 255, 255, 25); } "
-            "QPushButton:disabled { color: rgba(0, 0, 0, 80); }"
+            "QPushButton:hover { color: #ffffff; background: rgba(0, 0, 0, 220); } "
+            "QPushButton:disabled { color: rgba(200, 200, 200, 80); }"
         )
         self._back_btn.setEnabled(False)
         self._back_btn.clicked.connect(self._go_back)
+
+        self._settings_btn = QPushButton("⚙")
+        self._settings_btn.setToolTip("Settings")
+        self._settings_btn.setFixedSize(18, 18)
+        self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._settings_btn.setStyleSheet(
+            "QPushButton { background: rgba(0,0,0,160); color: #E2E8F0; "
+            "border: none; font-size: 13px; font-weight: bold; border-radius: 3px; } "
+            "QPushButton:hover { color: #ffffff; background: rgba(0, 0, 0, 220); }"
+        )
+        self._settings_btn.clicked.connect(self.toggle_settings)
 
         self._close_btn = QPushButton("✕")
         self._close_btn.setToolTip("Close HUD")
         self._close_btn.setFixedSize(18, 18)
         self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._close_btn.setStyleSheet(
-            "QPushButton { background: transparent; color: #000000; "
+            "QPushButton { background: rgba(0,0,0,160); color: #E2E8F0; "
             "border: none; font-size: 11px; font-weight: bold; border-radius: 3px; } "
-            "QPushButton:hover { color: #000000; background: rgba(255, 255, 255, 25); }"
+            "QPushButton:hover { color: #ff6b6b; background: rgba(0, 0, 0, 220); }"
         )
         self._close_btn.clicked.connect(self._quit_app)
 
@@ -385,11 +552,21 @@ class OverlayHUD(QWidget):
         header_layout.addStretch(1)
         header_layout.addWidget(self._snap_btn, 0)
         header_layout.addWidget(self._back_btn, 0)
+        header_layout.addWidget(self._settings_btn, 0)
         header_layout.addWidget(self._close_btn, 0)
+
+        # Wrap the icon row in a black pill container so icons are always visible
+        self._header_bar = QWidget()
+        self._header_bar.setObjectName("headerBar")
+        self._header_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._header_bar.setStyleSheet(
+            "#headerBar { background-color: rgba(0, 0, 0, 200); border-radius: 6px; }"
+        )
+        self._header_bar.setLayout(header_layout)
 
         self._status_label = QLabel(f"loading {self._page_url} …")
         self._status_label.setFont(QFont("Menlo", 8))
-        self._status_label.setStyleSheet("color: #000000;")
+        self._status_label.setStyleSheet("color: #A0AEC0; background: transparent;")
         self._status_label.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
         )
@@ -401,9 +578,33 @@ class OverlayHUD(QWidget):
         self._web_view.loadFinished.connect(self._on_load_finished)
         self._web_view.urlChanged.connect(self._update_back_button)
 
-        layout.addLayout(header_layout)
-        layout.addWidget(self._status_label)
-        layout.addWidget(self._web_view, 1)
+        self._stack = QStackedWidget(self)
+
+        self._browser_container = QWidget()
+        browser_layout = QVBoxLayout(self._browser_container)
+        browser_layout.setContentsMargins(0, 0, 0, 0)
+        browser_layout.setSpacing(4)
+        browser_layout.addWidget(self._status_label)
+        browser_layout.addWidget(self._web_view, 1)
+
+        self._settings_view = SettingsView(
+            hotkeys={
+                "hide": self._hide_hotkey.spec,
+                "click_through": self._hotkey.spec,
+                "screenshot": self._screenshot_hotkey.spec,
+                "quit": self._quit_hotkey.spec,
+                "move": self._move_modifiers,
+            },
+            parent=self,
+        )
+        self._settings_view.hotkey_changed.connect(self._on_hotkey_changed)
+        self._settings_view.back_requested.connect(self.show_browser)
+
+        self._stack.addWidget(self._browser_container)
+        self._stack.addWidget(self._settings_view)
+
+        layout.addWidget(self._header_bar)
+        layout.addWidget(self._stack, 1)
 
         self.set_interactive(self._interactive, apply_native=False)
         self._web_view.setUrl(QUrl.fromUserInput(self._page_url))
@@ -447,6 +648,36 @@ class OverlayHUD(QWidget):
             self.hide()
         else:
             self.show()
+
+    def show_settings(self) -> None:
+        """Switch view to the settings panel."""
+        self._stack.setCurrentWidget(self._settings_view)
+        self._settings_btn.setStyleSheet(
+            "QPushButton { background: rgba(255, 255, 255, 40); color: #E2E8F0; "
+            "border: none; font-size: 13px; font-weight: bold; border-radius: 3px; }"
+        )
+        self._snap_btn.setVisible(False)
+        self._back_btn.setVisible(False)
+
+    def show_browser(self) -> None:
+        """Switch view back to the browser overlay."""
+        self._settings_view.cancel_recording()
+        self._stack.setCurrentWidget(self._browser_container)
+        self._settings_btn.setStyleSheet(
+            "QPushButton { background: rgba(0,0,0,160); color: #E2E8F0; "
+            "border: none; font-size: 13px; font-weight: bold; border-radius: 3px; } "
+            "QPushButton:hover { color: #ffffff; background: rgba(0, 0, 0, 220); }"
+        )
+        self._snap_btn.setVisible(self._interactive)
+        self._back_btn.setVisible(self._interactive)
+        self._focus_page()
+
+    def toggle_settings(self) -> None:
+        """Toggle between browser and settings view."""
+        if self._stack.currentWidget() == self._settings_view:
+            self.show_browser()
+        else:
+            self.show_settings()
 
     # -- screenshots --------------------------------------------------------
 
@@ -557,6 +788,11 @@ class OverlayHUD(QWidget):
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents, transparent
             )
             self._snap_btn.setVisible(not transparent)
+        if hasattr(self, "_settings_btn"):
+            self._settings_btn.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, transparent
+            )
+            self._settings_btn.setVisible(not transparent)
         policy = (
             Qt.FocusPolicy.NoFocus if transparent
             else Qt.FocusPolicy.StrongFocus
@@ -609,7 +845,21 @@ class OverlayHUD(QWidget):
         modifiers: int,
         autorep: bool,
     ) -> None:
-        """Replay a captured global key stroke into the embedded page."""
+        """Replay a captured global key stroke into the embedded page or hotkey recorder."""
+        if hasattr(self, "_settings_view"):
+            rec = self._settings_view.active_recorder
+            if rec is not None:
+                if not is_release:
+                    rec.handle_key_stroke(qt_key, text)
+                return
+
+        if (
+            hasattr(self, "_stack")
+            and hasattr(self, "_settings_view")
+            and self._stack.currentWidget() == self._settings_view
+        ):
+            return
+
         event_type = (
             QEvent.Type.KeyRelease if is_release else QEvent.Type.KeyPress
         )
@@ -768,16 +1018,41 @@ def main() -> None:
     keepalive.start(200)
     keepalive.timeout.connect(lambda: None)
 
+    saved_cfg = load_hotkeys_config()
+    passed = sys.argv[1:]
+
+    def is_passed(flag: str) -> bool:
+        return any(a == flag or a.startswith(f"{flag}=") for a in passed)
+
+    hotkey_val = (
+        args.hotkey if is_passed("--hotkey")
+        else saved_cfg.get("click_through", args.hotkey)
+    )
+    hide_hotkey_val = (
+        args.hide_hotkey if is_passed("--hide-hotkey")
+        else saved_cfg.get("hide", args.hide_hotkey)
+    )
+    screenshot_hotkey_val = (
+        args.screenshot_hotkey if is_passed("--screenshot-hotkey")
+        else saved_cfg.get("screenshot", args.screenshot_hotkey)
+    )
+    quit_hotkey_val = (
+        args.quit_hotkey if is_passed("--quit-hotkey")
+        else saved_cfg.get("quit", args.quit_hotkey)
+    )
+    move_modifiers_val = saved_cfg.get("move", "ctrl+alt")
+
     try:
         hud = OverlayHUD(
             args.page,
             width=args.width,
             height=args.height,
             capture_exclusion=args.capture_exclusion,
-            hotkey=args.hotkey,
-            hide_hotkey=args.hide_hotkey,
-            screenshot_hotkey=args.screenshot_hotkey,
-            quit_hotkey=args.quit_hotkey,
+            hotkey=hotkey_val,
+            hide_hotkey=hide_hotkey_val,
+            screenshot_hotkey=screenshot_hotkey_val,
+            quit_hotkey=quit_hotkey_val,
+            move_modifiers=move_modifiers_val,
             screenshot_paste=args.screenshot_paste == "auto",
             screenshot_target=args.screenshot_target,
             start_click_through=args.start_click_through,
