@@ -532,6 +532,8 @@ class SettingsView(QWidget):
             ("screenshot", "Take Screenshot", hotkeys.get("screenshot", "ctrl+alt+s"), False),
             ("quit", "Quit Application", hotkeys.get("quit", "ctrl+alt+q"), False),
             ("move", "Move HUD (Arrow Keys)", hotkeys.get("move", "ctrl+alt"), True),
+            ("opacity_up", "Increase Opacity", hotkeys.get("opacity_up", "ctrl+alt+m"), False),
+            ("opacity_down", "Decrease Opacity", hotkeys.get("opacity_down", "ctrl+alt+n"), False),
         ]
 
         for action_id, title, spec, is_fixed in options:

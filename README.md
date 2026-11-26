@@ -127,6 +127,8 @@ and prints why, instead of spinning forever.
 - `--screenshot-paste` — `auto` (default) copies the screenshot and pastes it
   into the page you were typing in (or the focused window if your last click
   was outside the HUD); `clipboard` only copies it
+- `--microphone` — `allow` (default) grants microphone (`getUserMedia` audio)
+  requests from the embedded page; `deny` blocks them
 - `--start-click-through` — start locked/click-through instead of interactive
 - `--capture-exclusion` — `exclude` (default), `monitor`, or `off` (see below)
 
@@ -226,5 +228,11 @@ are ignored.
   so the app underneath never sees them. See “Glass overlay input” above.
 - **Capture exclusion** comes from `SetWindowDisplayAffinity` and is
   best-effort; see “Visual stealth” above.
+- **Microphone** access is denied by QtWebEngine unless the host grants it, so
+  the HUD answers `featurePermissionRequested` for `MediaAudioCapture` with
+  `PermissionGrantedByUser` (disable with `--microphone deny`; other media
+  permissions, including camera, stay denied). `getUserMedia` still requires a
+  secure origin (HTTPS or localhost), and on Windows the OS privacy setting
+  must allow desktop apps to use the microphone.
 - **Translucent panel** comes from `WA_TranslucentBackground` plus the
   rounded-rect stylesheet.

@@ -122,10 +122,13 @@ class OverlayHUD(QWidget):
     _HIDE_HOTKEY_ID = 0x4A36
     _SCREENSHOT_HOTKEY_ID = 0x4A37
     _QUIT_HOTKEY_ID = 0x4A38
+    _OPACITY_UP_HOTKEY_ID = 0x4A39
+    _OPACITY_DOWN_HOTKEY_ID = 0x4A3A
     _PASTE_DELAY_MS = 250
     _STATUS_RESET_MS = 3000
     _SLIDE_REPEAT_INITIAL_MS = 50   # first repeat delay (ms)
     _SLIDE_REPEAT_INTERVAL_MS = 30  # subsequent repeat interval (ms)
+    _OPACITY_STEP = 0.1             # opacity change per hotkey press
 
     # VK codes for the four arrow keys (used by GetAsyncKeyState polling)
     _VK_LEFT = 0x25
@@ -155,8 +158,11 @@ class OverlayHUD(QWidget):
         hide_hotkey: str = "ctrl+alt+c",
         screenshot_hotkey: str = "ctrl+alt+s",
         quit_hotkey: str = "ctrl+alt+q",
+        opacity_up_hotkey: str = "ctrl+alt+m",
+        opacity_down_hotkey: str = "ctrl+alt+n",
         screenshot_paste: bool = True,
         screenshot_target: str = "screen",
+        allow_microphone: bool = True,
         start_click_through: bool = False,
         click_through_opacity: float = 0.35,
         move_step: int = 40,
@@ -168,6 +174,7 @@ class OverlayHUD(QWidget):
         self._fixed_height = height
         self._capture_exclusion = capture_exclusion
         self._screenshot_target = screenshot_target
+        self._allow_microphone = bool(allow_microphone)
         self._interactive = not start_click_through
         self._base_opacity = 1.0
         self._click_through_opacity = max(
@@ -195,6 +202,14 @@ class OverlayHUD(QWidget):
             quit_hotkey, self, hotkey_id=self._QUIT_HOTKEY_ID
         )
         self._quit_hotkey.activated.connect(self._quit_app)
+        self._opacity_up_hotkey = GlobalHotkey(
+            opacity_up_hotkey, self, hotkey_id=self._OPACITY_UP_HOTKEY_ID
+        )
+        self._opacity_up_hotkey.activated.connect(self._increase_opacity)
+        self._opacity_down_hotkey = GlobalHotkey(
+            opacity_down_hotkey, self, hotkey_id=self._OPACITY_DOWN_HOTKEY_ID
+        )
+        self._opacity_down_hotkey.activated.connect(self._decrease_opacity)
         self._screenshot_status_timer = QTimer(self)
         self._screenshot_status_timer.setSingleShot(True)
         self._screenshot_status_timer.timeout.connect(self._restore_status)
@@ -224,6 +239,8 @@ class OverlayHUD(QWidget):
             self._hide_hotkey,
             self._screenshot_hotkey,
             self._quit_hotkey,
+            self._opacity_up_hotkey,
+            self._opacity_down_hotkey,
             *self._move_hotkeys,
             *self._slide_hotkeys,
         )
@@ -329,6 +346,8 @@ class OverlayHUD(QWidget):
             "click_through": self._hotkey.spec,
             "screenshot": self._screenshot_hotkey.spec,
             "quit": self._quit_hotkey.spec,
+            "opacity_up": self._opacity_up_hotkey.spec,
+            "opacity_down": self._opacity_down_hotkey.spec,
             "move": self._move_modifiers,
         }
         save_hotkeys_config(cfg)
@@ -354,6 +373,12 @@ class OverlayHUD(QWidget):
         elif action_id == "quit":
             ok = self._quit_hotkey.rebind(new_spec)
             error_msg = self._quit_hotkey.register_error
+        elif action_id == "opacity_up":
+            ok = self._opacity_up_hotkey.rebind(new_spec)
+            error_msg = self._opacity_up_hotkey.register_error
+        elif action_id == "opacity_down":
+            ok = self._opacity_down_hotkey.rebind(new_spec)
+            error_msg = self._opacity_down_hotkey.register_error
         elif action_id == "move":
             ok = self._update_move_hotkeys(new_spec)
             if not ok:
@@ -583,6 +608,9 @@ class OverlayHUD(QWidget):
 
         self._web_view = QWebEngineView(self)
         self._web_view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._web_view.page().featurePermissionRequested.connect(
+            self._on_feature_permission_requested
+        )
         self._web_view.loadStarted.connect(self._on_load_started)
         self._web_view.loadProgress.connect(self._on_load_progress)
         self._web_view.loadFinished.connect(self._on_load_finished)
@@ -603,6 +631,8 @@ class OverlayHUD(QWidget):
                 "click_through": self._hotkey.spec,
                 "screenshot": self._screenshot_hotkey.spec,
                 "quit": self._quit_hotkey.spec,
+                "opacity_up": self._opacity_up_hotkey.spec,
+                "opacity_down": self._opacity_down_hotkey.spec,
                 "move": self._move_modifiers,
             },
             parent=self,
@@ -830,6 +860,16 @@ class OverlayHUD(QWidget):
         self._base_opacity = max(0.1, min(1.0, float(opacity)))
         self._apply_opacity()
 
+    def _increase_opacity(self) -> None:
+        """Raise the HUD's base opacity by one step (clamped to 1.0)."""
+        self.set_base_opacity(self._base_opacity + self._OPACITY_STEP)
+        self._status_label.setText(f"opacity {self._base_opacity:.1f}")
+
+    def _decrease_opacity(self) -> None:
+        """Lower the HUD's base opacity by one step (clamped to 0.1)."""
+        self.set_base_opacity(self._base_opacity - self._OPACITY_STEP)
+        self._status_label.setText(f"opacity {self._base_opacity:.1f}")
+
     def _apply_opacity(self) -> None:
         target = (
             self._base_opacity
@@ -937,6 +977,27 @@ class OverlayHUD(QWidget):
         else:
             self._status_label.setText(f"failed to load {self._page_url}")
 
+    def _on_feature_permission_requested(
+        self, origin: QUrl, feature: QWebEnginePage.Feature
+    ) -> None:
+        page = self._web_view.page()
+        if (
+            self._allow_microphone
+            and feature == QWebEnginePage.Feature.MediaAudioCapture
+        ):
+            page.setFeaturePermission(
+                origin,
+                feature,
+                QWebEnginePage.PermissionPolicy.PermissionGrantedByUser,
+            )
+            _log(f"microphone access granted to {origin.toString()}")
+        else:
+            page.setFeaturePermission(
+                origin,
+                feature,
+                QWebEnginePage.PermissionPolicy.PermissionDeniedByUser,
+            )
+
     def _go_back(self) -> None:
         if self._web_view.history().canGoBack():
             self._web_view.back()
@@ -966,32 +1027,38 @@ def main() -> None:
         description="Borderless web page overlay with a click-through hotkey."
     )
     parser.add_argument("--page", default="https://www.google.com",
-                        help="Page to embed in the overlay "
-                             "(default: https://www.google.com)")
+                         help="Page to embed in the overlay "
+                              "(default: https://www.google.com)")
     parser.add_argument("--width", type=int, default=520,
-                        help="Overlay width in pixels (default: 520)")
+                         help="Overlay width in pixels (default: 520)")
     parser.add_argument("--height", type=int, default=680,
-                        help="Overlay height in pixels (default: 680)")
+                         help="Overlay height in pixels (default: 680)")
     parser.add_argument("--opacity", type=float, default=1.0,
-                        help="Window opacity in interactive mode, 0.0–1.0 "
-                             "(default: 1.0)")
+                         help="Window opacity in interactive mode, 0.0–1.0 "
+                              "(default: 1.0)")
     parser.add_argument("--click-through-opacity", type=float, default=0.35,
-                        help="Window opacity in click-through mode, 0.1–1.0 "
-                             "(default: 0.35)")
+                         help="Window opacity in click-through mode, 0.1–1.0 "
+                              "(default: 0.35)")
     parser.add_argument("--move-step", type=int, default=40,
-                        help="Pixels per Ctrl+Alt+Arrow nudge (default: 40)")
+                         help="Pixels per Ctrl+Alt+Arrow nudge (default: 40)")
     parser.add_argument("--hotkey", default="ctrl+alt+x",
-                        help="Global hotkey that toggles click-through "
-                             "(default: ctrl+alt+x)")
+                         help="Global hotkey that toggles click-through "
+                              "(default: ctrl+alt+x)")
     parser.add_argument("--hide-hotkey", default="ctrl+alt+c",
-                        help="Global hotkey that clears/hides the overlay and "
-                             "brings it back (default: ctrl+alt+c)")
+                         help="Global hotkey that clears/hides the overlay and "
+                              "brings it back (default: ctrl+alt+c)")
     parser.add_argument("--screenshot-hotkey", default="ctrl+alt+s",
-                        help="Global hotkey that copies a screenshot of the "
-                             "screen to the clipboard (default: ctrl+alt+s)")
+                         help="Global hotkey that copies a screenshot of the "
+                              "screen to the clipboard (default: ctrl+alt+s)")
     parser.add_argument("--quit-hotkey", default="ctrl+alt+q",
-                        help="Global hotkey that exits the HUD application "
-                             "(default: ctrl+alt+q)")
+                         help="Global hotkey that exits the HUD application "
+                              "(default: ctrl+alt+q)")
+    parser.add_argument("--opacity-up-hotkey", default="ctrl+alt+m",
+                         help="Global hotkey that raises HUD opacity "
+                              "(default: ctrl+alt+m)")
+    parser.add_argument("--opacity-down-hotkey", default="ctrl+alt+n",
+                         help="Global hotkey that lowers HUD opacity "
+                              "(default: ctrl+alt+n)")
     parser.add_argument("--screenshot-target", choices=("screen", "hud"),
                         default="screen",
                         help="Target for screenshots: 'screen' captures the "
@@ -1002,6 +1069,11 @@ def main() -> None:
                         help="'auto' also pastes the screenshot into the HUD "
                              "page or the focused window; 'clipboard' only "
                              "copies it (default: auto)")
+    parser.add_argument("--microphone", choices=("allow", "deny"),
+                        default="allow",
+                        help="Microphone access for the embedded page: 'allow' "
+                             "grants getUserMedia audio requests, 'deny' "
+                             "blocks them (default: allow)")
     parser.add_argument("--start-click-through", action="store_true",
                         help="Start in click-through mode instead of "
                              "interactive mode")
@@ -1050,6 +1122,14 @@ def main() -> None:
         args.quit_hotkey if is_passed("--quit-hotkey")
         else saved_cfg.get("quit", args.quit_hotkey)
     )
+    opacity_up_hotkey_val = (
+        args.opacity_up_hotkey if is_passed("--opacity-up-hotkey")
+        else saved_cfg.get("opacity_up", args.opacity_up_hotkey)
+    )
+    opacity_down_hotkey_val = (
+        args.opacity_down_hotkey if is_passed("--opacity-down-hotkey")
+        else saved_cfg.get("opacity_down", args.opacity_down_hotkey)
+    )
     move_modifiers_val = saved_cfg.get("move", "ctrl+alt")
 
     try:
@@ -1062,9 +1142,12 @@ def main() -> None:
             hide_hotkey=hide_hotkey_val,
             screenshot_hotkey=screenshot_hotkey_val,
             quit_hotkey=quit_hotkey_val,
+            opacity_up_hotkey=opacity_up_hotkey_val,
+            opacity_down_hotkey=opacity_down_hotkey_val,
             move_modifiers=move_modifiers_val,
             screenshot_paste=args.screenshot_paste == "auto",
             screenshot_target=args.screenshot_target,
+            allow_microphone=args.microphone == "allow",
             start_click_through=args.start_click_through,
             click_through_opacity=args.click_through_opacity,
             move_step=args.move_step,

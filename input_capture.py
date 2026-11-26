@@ -334,13 +334,13 @@ class InputGate(QObject):
     def _qt_modifiers(self) -> int:
         mods = 0
         if self._down(_VK_SHIFT):
-            mods |= int(Qt.KeyboardModifier.ShiftModifier)
+            mods |= Qt.KeyboardModifier.ShiftModifier.value
         if self._down(_VK_CONTROL):
-            mods |= int(Qt.KeyboardModifier.ControlModifier)
+            mods |= Qt.KeyboardModifier.ControlModifier.value
         if self._down(_VK_MENU):
-            mods |= int(Qt.KeyboardModifier.AltModifier)
+            mods |= Qt.KeyboardModifier.AltModifier.value
         if self._down(_VK_LWIN) or self._down(_VK_RWIN):
-            mods |= int(Qt.KeyboardModifier.MetaModifier)
+            mods |= Qt.KeyboardModifier.MetaModifier.value
         return mods
 
     def _raw_modifiers(self) -> int:
