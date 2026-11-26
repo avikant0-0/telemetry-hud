@@ -5,9 +5,11 @@ Telemetry HUD — a borderless, always-on-top overlay that embeds a web page
 
 The overlay starts interactive: clicks and typing are delivered to the page
 without ever activating the window, so the app underneath keeps focus and
-never sees a window switch. A system-wide hotkey (Ctrl+Alt+X by default)
-toggles click-through mode, in which mouse and keyboard input pass through to
-whatever is underneath.
+never sees a window switch. The header includes a browser-style address bar:
+click it (or press Ctrl+L) to type a URL and press Enter to navigate. Drag
+the diagonal grip in the bottom-right corner to resize the HUD.
+A system-wide hotkey (Ctrl+Alt+X by default) toggles click-through mode, in
+which mouse and keyboard input pass through to whatever is underneath.
 Ctrl+Alt+C clears (hides) the overlay completely; the same hotkey brings it back.
 Ctrl+Alt+Arrow keys nudge the overlay in any mode, and click-through mode
 dims the window so it stays unobtrusive. Ctrl+Alt+S grabs a screenshot of the
@@ -54,13 +56,26 @@ import argparse
 import signal
 import sys
 
-from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer, QUrl
+from PyQt6.QtCore import (
+    QEvent,
+    QPoint,
+    QPointF,
+    QRect,
+    Qt,
+    QTimer,
+    QUrl,
+    pyqtSignal,
+)
 from PyQt6.QtGui import (
+    QColor,
+    QFocusEvent,
     QFont,
     QGuiApplication,
     QHideEvent,
     QKeyEvent,
     QMouseEvent,
+    QPainter,
+    QPen,
     QShowEvent,
     QWheelEvent,
 )
@@ -68,7 +83,9 @@ from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -99,13 +116,151 @@ from hotkey_ui import (
     save_hotkeys_config,
 )
 from input_capture import InputGate
-from screenshot import capture_screen, capture_widget, paste_shortcut
+from screenshot import (
+    RegionSelector,
+    capture_screen,
+    capture_widget,
+    load_capture_region,
+    paste_shortcut,
+    save_capture_region,
+)
 from win_stealth import (
     CAPTURE_MODES,
     StealthReport,
     apply_window_stealth,
     set_input_transparency,
 )
+
+
+class UrlBar(QLineEdit):
+    """Browser-style address bar for the never-activated HUD window.
+
+    Qt does not deliver focus to widgets of an inactive window, so typing is
+    replayed by the global input gate straight into this widget. A synthetic
+    focus event keeps the text cursor blinking while the bar is being edited.
+    """
+
+    activated = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._editing = False
+        self.setFont(QFont("Segoe UI", 8))
+        self.setFixedHeight(20)
+        self.setPlaceholderText("Enter a URL")
+        self.setToolTip("Address bar — type a URL and press Enter (Ctrl+L)")
+        self.setProperty("editing", False)
+        self.setStyleSheet(
+            "QLineEdit { background: rgba(255, 255, 255, 18); color: #E2E8F0; "
+            "border: 1px solid rgba(255, 255, 255, 35); border-radius: 4px; "
+            "padding: 0px 6px; "
+            "selection-background-color: rgba(90, 170, 255, 160); } "
+            "QLineEdit[editing=\"true\"] { background: rgba(0, 0, 0, 140); "
+            "border: 1px solid rgba(90, 170, 255, 200); }"
+        )
+
+    @property
+    def editing(self) -> bool:
+        return self._editing
+
+    def set_editing(self, editing: bool) -> None:
+        editing = bool(editing)
+        if self._editing == editing:
+            return
+        self._editing = editing
+        self.setProperty("editing", editing)
+        style = self.style()
+        style.unpolish(self)
+        style.polish(self)
+        self.update()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        was_editing = self._editing
+        super().mousePressEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            if not was_editing:
+                self.selectAll()
+            self.activated.emit()
+
+
+class ResizeGrip(QWidget):
+    """Bottom-right drag handle that resizes the frameless HUD."""
+
+    _SIZE = 14
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setFixedSize(self._SIZE, self._SIZE)
+        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        self.setToolTip("Drag to resize")
+        policy = QSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        policy.setRetainSizeWhenHidden(True)
+        self.setSizePolicy(policy)
+        self._origin: QPoint | None = None
+        self._start_size = None
+
+    def enterEvent(self, event: QEvent) -> None:
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event: QEvent) -> None:
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._origin = event.globalPosition().toPoint()
+            self._start_size = self.window().size()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if (
+            self._origin is not None
+            and self._start_size is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            delta = event.globalPosition().toPoint() - self._origin
+            window = self.window()
+            width = max(
+                window.minimumWidth(), self._start_size.width() + delta.x()
+            )
+            height = max(
+                window.minimumHeight(), self._start_size.height() + delta.y()
+            )
+            window.resize(width, height)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._origin is not None
+        ):
+            self._origin = None
+            self._start_size = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event: QEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor("#A0AEC0") if self.underMouse() else QColor("#5A6478")
+        painter.setPen(
+            QPen(color, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        )
+        width = self.width()
+        height = self.height()
+        for offset in (0, 5, 10):
+            painter.drawLine(
+                width - 3 - offset, height - 2, width - 2, height - 3 - offset
+            )
+        painter.end()
 
 
 class OverlayHUD(QWidget):
@@ -174,6 +329,8 @@ class OverlayHUD(QWidget):
         self._fixed_height = height
         self._capture_exclusion = capture_exclusion
         self._screenshot_target = screenshot_target
+        self._capture_region = load_capture_region()
+        self._region_selector: RegionSelector | None = None
         self._allow_microphone = bool(allow_microphone)
         self._interactive = not start_click_through
         self._base_opacity = 1.0
@@ -414,12 +571,14 @@ class OverlayHUD(QWidget):
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
+        self._install_page_filters()
         self._apply_stealth()
         self._register_hotkey()
         self._sync_input_gate()
 
     def hideEvent(self, event: QHideEvent) -> None:
         super().hideEvent(event)
+        self._leave_url_edit(revert=True)
         self._input_gate.disable()
 
     def event(self, event: QEvent) -> bool:
@@ -441,12 +600,34 @@ class OverlayHUD(QWidget):
         ):
             self._focus_page()
 
+    def eventFilter(self, obj, event: QEvent) -> bool:
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and hasattr(self, "_url_edit")
+            and self._url_edit.editing
+        ):
+            self._leave_url_edit()
+        return super().eventFilter(obj, event)
+
+    def _install_page_filters(self) -> None:
+        """Watch the page's input widget so clicks end address-bar editing."""
+        view = getattr(self, "_web_view", None)
+        if view is None:
+            return
+        proxy = view.focusProxy()
+        if proxy is not None and proxy is not getattr(
+            self, "_page_filter_proxy", None
+        ):
+            proxy.installEventFilter(self)
+            self._page_filter_proxy = proxy
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         # Clicks on the frame/header/status area must still put the keyboard
         # focus into the embedded page. The window deliberately never becomes
         # active; the global input gate handles typing without a focus change.
         # A press on the frame (anything outside the page) also starts a drag.
         if self._interactive and event.button() == Qt.MouseButton.LeftButton:
+            self._leave_url_edit()
             if not (hasattr(self, "_stack") and hasattr(self, "_settings_view") and self._stack.currentWidget() == self._settings_view):
                 self._focus_page()
             self._drag_origin = event.globalPosition().toPoint()
@@ -527,7 +708,10 @@ class OverlayHUD(QWidget):
     def _build_ui(self) -> None:
         self.setObjectName("hudPanel")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setFixedSize(self._fixed_width, self._fixed_height)
+        self.setMinimumSize(
+            min(360, self._fixed_width), min(260, self._fixed_height)
+        )
+        self.resize(self._fixed_width, self._fixed_height)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -545,6 +729,17 @@ class OverlayHUD(QWidget):
             "QPushButton:hover { color: #ffffff; background: rgba(0, 0, 0, 220); }"
         )
         self._snap_btn.clicked.connect(self.copy_screenshot)
+
+        self._region_btn = QPushButton("▣")
+        self._region_btn.setFixedSize(18, 18)
+        self._region_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._region_btn.setStyleSheet(
+            "QPushButton { background: rgba(0,0,0,160); color: #E2E8F0; "
+            "border: none; font-size: 11px; font-weight: bold; border-radius: 3px; } "
+            "QPushButton:hover { color: #ffffff; background: rgba(0, 0, 0, 220); }"
+        )
+        self._region_btn.clicked.connect(self.configure_screenshot_region)
+        self._update_region_button()
 
         self._back_btn = QPushButton("‹")
         self._back_btn.setToolTip("Back")
@@ -581,11 +776,18 @@ class OverlayHUD(QWidget):
         )
         self._close_btn.clicked.connect(self._quit_app)
 
+        self._url_edit = UrlBar(self)
+        self._url_edit.setText(self._page_url)
+        self._url_edit.setCursorPosition(0)
+        self._url_edit.activated.connect(self._on_url_bar_activated)
+        self._url_edit.returnPressed.connect(self._navigate_to_url)
+
         header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setContentsMargins(2, 0, 0, 0)
         header_layout.setSpacing(4)
-        header_layout.addStretch(1)
+        header_layout.addWidget(self._url_edit, 1)
         header_layout.addWidget(self._snap_btn, 0)
+        header_layout.addWidget(self._region_btn, 0)
         header_layout.addWidget(self._back_btn, 0)
         header_layout.addWidget(self._settings_btn, 0)
         header_layout.addWidget(self._close_btn, 0)
@@ -615,6 +817,8 @@ class OverlayHUD(QWidget):
         self._web_view.loadProgress.connect(self._on_load_progress)
         self._web_view.loadFinished.connect(self._on_load_finished)
         self._web_view.urlChanged.connect(self._update_back_button)
+        self._web_view.installEventFilter(self)
+        self._install_page_filters()
 
         self._stack = QStackedWidget(self)
 
@@ -646,6 +850,13 @@ class OverlayHUD(QWidget):
         layout.addWidget(self._header_bar)
         layout.addWidget(self._stack, 1)
 
+        footer_layout = QHBoxLayout()
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.addStretch(1)
+        self._resize_grip = ResizeGrip(self)
+        footer_layout.addWidget(self._resize_grip, 0)
+        layout.addLayout(footer_layout)
+
         self.set_interactive(self._interactive, apply_native=False)
         self._web_view.setUrl(QUrl.fromUserInput(self._page_url))
 
@@ -654,7 +865,6 @@ class OverlayHUD(QWidget):
         if primary is None:
             return
         screen = primary.availableGeometry()
-        self.adjustSize()
         x = screen.right() - self.width() - margin
         y = screen.top() + margin
         self.move(x, y)
@@ -691,13 +901,16 @@ class OverlayHUD(QWidget):
 
     def show_settings(self) -> None:
         """Switch view to the settings panel."""
+        self._leave_url_edit(revert=True)
         self._stack.setCurrentWidget(self._settings_view)
         self._settings_btn.setStyleSheet(
             "QPushButton { background: rgba(255, 255, 255, 40); color: #E2E8F0; "
             "border: none; font-size: 13px; font-weight: bold; border-radius: 3px; }"
         )
         self._snap_btn.setVisible(False)
+        self._region_btn.setVisible(False)
         self._back_btn.setVisible(False)
+        self._url_edit.setVisible(False)
 
     def show_browser(self) -> None:
         """Switch view back to the browser overlay."""
@@ -709,7 +922,9 @@ class OverlayHUD(QWidget):
             "QPushButton:hover { color: #ffffff; background: rgba(0, 0, 0, 220); }"
         )
         self._snap_btn.setVisible(self._interactive)
+        self._region_btn.setVisible(self._interactive)
         self._back_btn.setVisible(self._interactive)
+        self._url_edit.setVisible(self._url_bar_visible())
         self._focus_page()
 
     def toggle_settings(self) -> None:
@@ -721,19 +936,73 @@ class OverlayHUD(QWidget):
 
     # -- screenshots --------------------------------------------------------
 
+    def configure_screenshot_region(self) -> None:
+        """Open the full-screen picker for the screenshot area."""
+        if self._region_selector is not None:
+            self._region_selector.raise_()
+            self._region_selector.activateWindow()
+            return
+        self._input_gate.disable()
+        selector = RegionSelector(self._capture_region, self)
+        selector.region_selected.connect(self._set_capture_region)
+        selector.full_screen_selected.connect(self._reset_capture_region)
+        selector.finished.connect(self._on_region_selector_finished)
+        self._region_selector = selector
+        selector.showFullScreen()
+        selector.activateWindow()
+        selector.setFocus()
+
+    def _on_region_selector_finished(self) -> None:
+        selector = self._region_selector
+        self._region_selector = None
+        if selector is not None:
+            selector.deleteLater()
+        self._sync_input_gate()
+
+    def _set_capture_region(self, region: QRect) -> None:
+        self._capture_region = QRect(region)
+        save_capture_region(self._capture_region)
+        self._update_region_button()
+        self._status_label.setText(
+            "screenshot area: "
+            f"{self._capture_region.width()}×{self._capture_region.height()}"
+        )
+        self._screenshot_status_timer.start(self._STATUS_RESET_MS)
+
+    def _reset_capture_region(self) -> None:
+        self._capture_region = None
+        save_capture_region(None)
+        self._update_region_button()
+        self._status_label.setText("screenshot area: full screen")
+        self._screenshot_status_timer.start(self._STATUS_RESET_MS)
+
+    def _update_region_button(self) -> None:
+        if not hasattr(self, "_region_btn"):
+            return
+        if self._capture_region is None:
+            area = "full screen"
+        else:
+            area = f"{self._capture_region.width()}×{self._capture_region.height()}"
+        self._region_btn.setToolTip(f"Screenshot area: {area} (click to change)")
+
     def copy_screenshot(self) -> None:
         """Copy the screen (or embedded page) to the clipboard, then optionally paste."""
         if self._screenshot_target == "hud":
             pixmap = capture_widget(self._web_view)
         else:
-            pixmap = capture_screen()
+            pixmap = capture_screen(region=self._capture_region)
 
         if pixmap is None:
             _log("screenshot skipped: unable to capture target")
             return
         QGuiApplication.clipboard().setPixmap(pixmap)
         size = f"{pixmap.width()}×{pixmap.height()}"
-        target_name = "screen" if self._screenshot_target != "hud" else "HUD"
+        if self._screenshot_target == "hud":
+            target_name = "HUD"
+        elif self._capture_region is not None:
+            target_name = "screen area"
+        else:
+            target_name = "screen"
         if self._screenshot_paste:
             self._status_label.setText(
                 f"copied {target_name} ({size}) · pasting …"
@@ -791,6 +1060,8 @@ class OverlayHUD(QWidget):
     ) -> None:
         self._interactive = bool(interactive)
         transparent = not self._interactive
+        if transparent:
+            self._leave_url_edit()
         self._apply_opacity()
 
         self._sync_window_flags()
@@ -828,11 +1099,26 @@ class OverlayHUD(QWidget):
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents, transparent
             )
             self._snap_btn.setVisible(not transparent)
+        if hasattr(self, "_region_btn"):
+            self._region_btn.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, transparent
+            )
+            self._region_btn.setVisible(not transparent)
         if hasattr(self, "_settings_btn"):
             self._settings_btn.setAttribute(
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents, transparent
             )
             self._settings_btn.setVisible(not transparent)
+        if hasattr(self, "_url_edit"):
+            self._url_edit.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, transparent
+            )
+            self._url_edit.setVisible(self._url_bar_visible())
+        if hasattr(self, "_resize_grip"):
+            self._resize_grip.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, transparent
+            )
+            self._resize_grip.setVisible(not transparent)
         policy = (
             Qt.FocusPolicy.NoFocus if transparent
             else Qt.FocusPolicy.StrongFocus
@@ -887,6 +1173,76 @@ class OverlayHUD(QWidget):
     def _page_target(self) -> QWidget:
         return self._web_view.focusProxy() or self._web_view
 
+    def _url_bar_visible(self) -> bool:
+        if not self._interactive:
+            return False
+        if (
+            hasattr(self, "_stack")
+            and hasattr(self, "_settings_view")
+            and self._stack.currentWidget() == self._settings_view
+        ):
+            return False
+        return True
+
+    def _on_url_bar_activated(self) -> None:
+        self._enter_url_edit(select_all=False)
+
+    def _enter_url_edit(self, select_all: bool = False) -> None:
+        """Start editing the address bar (the window is never activated)."""
+        if not hasattr(self, "_url_edit"):
+            return
+        if not self._interactive or not self._url_edit.isVisible():
+            return
+        was_editing = self._url_edit.editing
+        self._url_edit.set_editing(True)
+        if select_all:
+            self._url_edit.selectAll()
+        if not was_editing:
+            self._url_edit.setFocus(Qt.FocusReason.MouseFocusReason)
+            QApplication.sendEvent(
+                self._url_edit,
+                QFocusEvent(
+                    QEvent.Type.FocusIn, Qt.FocusReason.MouseFocusReason
+                ),
+            )
+
+    def _leave_url_edit(self, revert: bool = False) -> None:
+        """Stop editing the address bar and return typing to the page."""
+        if not hasattr(self, "_url_edit") or not self._url_edit.editing:
+            return
+        self._url_edit.set_editing(False)
+        self._url_edit.deselect()
+        if revert:
+            self._url_edit.setText(self._current_url())
+            self._url_edit.setCursorPosition(0)
+        self._url_edit.clearFocus()
+        QApplication.sendEvent(
+            self._url_edit,
+            QFocusEvent(QEvent.Type.FocusOut, Qt.FocusReason.OtherFocusReason),
+        )
+        if (
+            not hasattr(self, "_stack")
+            or not hasattr(self, "_settings_view")
+            or self._stack.currentWidget() != self._settings_view
+        ):
+            self._focus_page()
+
+    def _navigate_to_url(self) -> None:
+        """Load whatever is typed in the address bar."""
+        if not hasattr(self, "_url_edit"):
+            return
+        text = self._url_edit.text().strip()
+        if not text:
+            self._leave_url_edit(revert=True)
+            return
+        url = QUrl.fromUserInput(text)
+        if not url.isValid():
+            self._status_label.setText(f"invalid URL: {text}")
+            self._screenshot_status_timer.start(self._STATUS_RESET_MS)
+            return
+        self._leave_url_edit()
+        self._web_view.setUrl(url)
+
     def _inject_key(
         self,
         qt_key: int,
@@ -908,6 +1264,39 @@ class OverlayHUD(QWidget):
             and hasattr(self, "_settings_view")
             and self._stack.currentWidget() == self._settings_view
         ):
+            return
+
+        if hasattr(self, "_url_edit") and self._url_edit.editing:
+            if is_release:
+                return
+            if qt_key == int(Qt.Key.Key_Escape):
+                self._leave_url_edit(revert=True)
+                return
+            if qt_key in (int(Qt.Key.Key_Return), int(Qt.Key.Key_Enter)):
+                self._navigate_to_url()
+                return
+            QApplication.sendEvent(
+                self._url_edit,
+                QKeyEvent(
+                    QEvent.Type.KeyPress,
+                    int(qt_key),
+                    Qt.KeyboardModifier(int(modifiers)),
+                    text or "",
+                    bool(autorep),
+                ),
+            )
+            return
+
+        ctrl = int(Qt.KeyboardModifier.ControlModifier.value)
+        alt = int(Qt.KeyboardModifier.AltModifier.value)
+        meta = int(Qt.KeyboardModifier.MetaModifier.value)
+        if (
+            not is_release
+            and qt_key == int(Qt.Key.Key_L)
+            and (int(modifiers) & ctrl)
+            and not (int(modifiers) & (alt | meta))
+        ):
+            self._enter_url_edit(select_all=True)
             return
 
         event_type = (
@@ -1004,6 +1393,14 @@ class OverlayHUD(QWidget):
 
     def _update_back_button(self, *_args) -> None:
         self._back_btn.setEnabled(self._web_view.history().canGoBack())
+        if (
+            hasattr(self, "_url_edit")
+            and not self._url_edit.editing
+        ):
+            url = self._web_view.url().toString()
+            if url and url != self._url_edit.text():
+                self._url_edit.setText(url)
+                self._url_edit.setCursorPosition(0)
 
     def _current_url(self) -> str:
         url = self._web_view.url().toString()

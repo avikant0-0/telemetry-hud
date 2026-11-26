@@ -5,8 +5,12 @@ A borderless, translucent, always-on-top overlay that embeds a web page
 typing, and scrolling reach the embedded page while the window underneath
 keeps focus — the HUD is a layer of glass, not a window that pops up in
 front. Click inside the HUD to engage typing; click outside to release it.
-Drag the header bar to move the HUD. The `◉` header button takes a screenshot
-(same as `Ctrl+Alt+S`), `‹` goes back in the page history, `⚙` opens the
+Drag the header bar to move the HUD. The header also has a browser-style
+address bar: click it (or press `Ctrl+L`) to type a URL, then press Enter to
+navigate. Drag the diagonal grip in the bottom-right corner to resize the
+HUD. The `◉` header button takes a screenshot
+(same as `Ctrl+Alt+S`), the `▣` button next to it configures the screenshot
+area, `‹` goes back in the page history, `⚙` opens the
 in-app Hotkey Settings panel, and `✕` quits the application. Press the global
 hotkey (`Ctrl+Alt+X` by default) to toggle
 **click-through** mode, where input passes straight through to whatever is
@@ -34,7 +38,7 @@ resist you or your tools shutting it down.
 | `hotkey_ui.py`   | Hotkey selector settings panel and key recording controls.          |
 | `input_capture.py` | Global keyboard/mouse gate that feeds input to the glass overlay. |
 | `hotkey.py`      | System-wide hotkeys (RegisterHotKey): click-through toggle, hide, movement, and screenshot. |
-| `screenshot.py`  | Screen and page capture, clipboard copy, and synthesized Ctrl+V paste. |
+| `screenshot.py`  | Screen and page capture, region selection, clipboard copy, and synthesized Ctrl+V paste. |
 | `win_stealth.py` | Windows capture exclusion + non-activating/input-transparent window styles. |
 | `supervisor.py`  | Optional crash-recovery watchdog (relaunches the HUD if it exits).  |
 | `mock_server.py` | Legacy WebSocket test source (no longer used by the overlay).       |
@@ -56,7 +60,9 @@ python hud.py
 
 You should see a panel in the top-right corner showing Google. Click into it
 to engage typing (the app underneath keeps focus and never sees the
-keystrokes); click outside the HUD to release it. `Ctrl+Alt+X` locks it into
+keystrokes); click outside the HUD to release it. Click the address bar (or
+press `Ctrl+L`), type a URL, and press Enter to navigate. Drag the grip in the
+bottom-right corner to resize the panel. `Ctrl+Alt+X` locks it into
 click-through mode, and the same hotkey unlocks it. `Ctrl+Alt+C` clears the
 overlay (makes it disappear entirely); press it
 again to bring it back. `Ctrl+Alt+Arrow` moves the panel; it is clamped to the
@@ -87,6 +93,12 @@ omitted from the screenshot and does not block whatever is on your screen.
 If you instead wish to capture only the HUD's embedded browser view, pass
 `--screenshot-target hud`.
 
+To capture a smaller area, click the `▣` button next to `◉`: a full-screen
+picker appears, and you drag a rectangle. The chosen area is saved to
+`screenshot.json` next to the app and reused for every screenshot until you
+change it — no prompt on capture. Press `R` in the picker to reset to full
+screen, or `Esc` to cancel.
+
 With `--screenshot-paste auto` (the default) the HUD waits ~250 ms for you to
 release the hotkey, then pastes the image. If you last clicked inside the HUD,
 it is pasted into the embedded page (via QtWebEngine) at the focused prompt
@@ -113,8 +125,10 @@ and prints why, instead of spinning forever.
 
 `hud.py`:
 - `--page` — page to embed (default `https://www.google.com`)
-- `--width` — overlay width in pixels (default 520)
-- `--height` — overlay height in pixels (default 680)
+- `--width` — initial overlay width in pixels (default 520); drag the
+  bottom-right grip to resize
+- `--height` — initial overlay height in pixels (default 680); drag the
+  bottom-right grip to resize
 - `--opacity` — window opacity in interactive mode, 0.1–1.0 (default 1.0)
 - `--click-through-opacity` — window opacity in click-through mode, 0.1–1.0
   (default 0.35)
